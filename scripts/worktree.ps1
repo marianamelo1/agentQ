@@ -116,6 +116,16 @@ function Write-JsonFile {
     [System.IO.File]::WriteAllText($Path, $json, $enc)
 }
 
+function Test-PathSafe {
+    # WHY not a bare Test-Path: a malformed config VALUE (illegal characters like '<'/'>'
+    # left over from an unfilled placeholder, a too-long path, ...) makes Test-Path itself
+    # throw rather than return $false -  and -DetectRepo scans every registered repo in one
+    # pass, so one bad entry must not crash the scan for every OTHER repo. Report false instead.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try { return (Test-Path -LiteralPath $Path -PathType Container) }
+    catch { return $false }
+}
+
 function Get-NormalizedPath {
     # Canonical form for path-identity comparisons (git mixes / and \ on Windows; casing varies).
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -335,13 +345,13 @@ function Invoke-ModeDetectRepo {
     # they mean, so skip branch/hint matching entirely -  just confirm it's really a worktree of
     # one of the (possibly -RepoFilter narrowed) registered repos, and hand it straight back.
     if (-not [string]::IsNullOrWhiteSpace($WorktreePath)) {
-        if (-not (Test-Path -LiteralPath $WorktreePath -PathType Container)) {
+        if (-not (Test-PathSafe -Path $WorktreePath)) {
             throw "-WorktreePath does not exist: $WorktreePath"
         }
         $normalizedTarget = Get-NormalizedPath -Path $WorktreePath
         foreach ($slug in $repos.Keys) {
             $path = $repos[$slug]
-            if (-not (Test-Path -LiteralPath $path -PathType Container)) { continue }
+            if (-not (Test-PathSafe -Path $path)) { continue }
             $null = Invoke-Git -Dir $path -GitArgs @('rev-parse', '--is-inside-work-tree') -AllowFail
             if ($script:LastGitExit -ne 0) { continue }
             foreach ($wtEntry in (Get-GitWorktreeEntries -Dir $path)) {
@@ -365,7 +375,7 @@ function Invoke-ModeDetectRepo {
 
     foreach ($slug in $repos.Keys) {
         $path = $repos[$slug]
-        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        if (-not (Test-PathSafe -Path $path)) {
             $skipped.Add([ordered]@{ repoSlug = $slug; repoPath = $path; reason = 'path not found on this machine' })
             continue
         }
