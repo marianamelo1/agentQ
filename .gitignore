@@ -1,0 +1,17 @@
+# Machine-local configuration — copy from the committed .example files
+.env
+.claude/qa-agent-config.jsonc
+
+# Run outputs and caches (per-repo/per-branch state, never committed)
+workspace/*
+!workspace/.gitkeep
+tools/*
+!tools/.gitkeep
+
+# Reports are local evidence for human review; keep the folder, ignore contents
+reports/*
+!reports/.gitkeep
+
+# OS noise
+Thumbs.db
+.DS_Store

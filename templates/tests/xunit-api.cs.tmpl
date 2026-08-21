@@ -1,0 +1,67 @@
+// agentQ style anchor — xUnit API test (WebApplicationFactory).
+// qa-scenario-writer: replace every {{token}}; keep the structure and the trait.
+//
+// TRAPS this file encodes — do not "clean up":
+//  - ONE WebApplicationFactory per test ASSEMBLY. Booting per test class multiplies
+//    host builds, and WebApplicationFactory's 5s host-build timeout is not
+//    configurable — parallel boots under load manufacture false reds. The
+//    collection fixture below is the xUnit way to share a single instance.
+//  - xUnit is INSTANCE-PER-TEST: a new instance of the test class is created for
+//    every [Fact]/[Theory]. The ctor runs per test — keep it to cheap client
+//    creation; anything expensive belongs in the fixture.
+//  - UseKestrel(0) must run in the fixture ctor BEFORE the first CreateClient()/
+//    Services access — after initialization it throws. Port 0 = ephemeral port,
+//    real HTTP on net10 (loopback only, per agentQ safety rules).
+//  - Assertion dialect: FluentAssertions shown because the adapter profile said
+//    assertionDialect=fluentassertions. MIRROR THE REPO — if the profile says
+//    shouldly or native, rewrite the asserts; NEVER add a package reference.
+//  - If the repo already declares a collection fixture for its factory, JOIN it —
+//    a second [CollectionDefinition] means a second app boot.
+
+using System.Net;
+using System.Net.Http.Json;
+using FluentAssertions;                          // profile: assertionDialect=fluentassertions
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+namespace {{TestNamespace}};
+
+// ---- shared factory: exactly one app boot for the whole assembly -------------
+public sealed class AgentQApiFactory : WebApplicationFactory<{{TEntryPoint}}>
+{
+    public AgentQApiFactory()
+    {
+        // Real Kestrel on an ephemeral port; MUST precede first initialization.
+        UseKestrel(0);
+    }
+}
+
+// Declared ONCE per assembly; every agentQ API test class joins this collection.
+[CollectionDefinition("agentQ-api")]
+public sealed class AgentQApiCollection : ICollectionFixture<AgentQApiFactory> { }
+
+[Collection("agentQ-api")]
+public sealed class {{TestClassName}}
+{
+    private readonly HttpClient _client;
+
+    // Runs per TEST (xUnit instance-per-test) — cheap work only.
+    public {{TestClassName}}(AgentQApiFactory factory)
+    {
+        _client = factory.CreateClient();
+    }
+
+    // AC-{{n}}: {{verbatim acceptance-criterion text}}
+    [Fact]
+    [Trait("Category", "agentQ-generated")]      // run-tests.ps1 filters Category=agentQ-generated
+    public async Task {{Endpoint}}_{{Scenario}}_{{ExpectedOutcome}}()
+    {
+        var response = await _client.PostAsJsonAsync("{{/api/route}}", new { {{concreteDomainPayload}} });
+
+        // Non-vacuous by contract: this assert FAILS on the base branch if the
+        // AC's behavior regresses. Asserting "did not throw" alone is banned.
+        response.StatusCode.Should().Be(HttpStatusCode.{{ExpectedStatus}});
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("{{expected-domain-detail}}");
+    }
+}

@@ -1,0 +1,59 @@
+// agentQ style anchor — NUnit 3 component/domain test (boundary values).
+// qa-scenario-writer: replace every {{token}}; keep the category and the
+// AC traceability comments.
+//
+// TRAPS this file encodes — do not "clean up":
+//  - Component level = the domain rule exercised DIRECTLY. No WebApplicationFactory,
+//    no HTTP — that is the API level's job.
+//  - [TestCase] rows encode the BOUNDARY LATTICE: below / at / just above the
+//    threshold. A single happy-path row is a vacuous test and is banned.
+//  - Attribute arguments cannot be `decimal` (CLR restriction) — pass double in
+//    [TestCase] and convert inside the test, or use [TestCaseSource] when
+//    precision at the boundary matters (money usually does).
+//  - NUnit is SHARED-INSTANCE: one fixture object runs all tests — no mutable
+//    instance fields unless reset in [SetUp].
+//  - Assertion dialect: Shouldly shown because the adapter profile said
+//    assertionDialect=shouldly. MIRROR THE REPO — use NUnit-native
+//    Assert.That(...) if the profile says native; NEVER add a package reference.
+//  - [Category], not [Trait] — run-tests.ps1 filters TestCategory=agentQ-generated.
+
+using NUnit.Framework;
+using Shouldly;   // profile: assertionDialect=shouldly — never introduce if unreferenced
+
+namespace {{TestNamespace}};
+
+[TestFixture]
+[Category("agentQ-generated")]     // run-tests.ps1 filter: TestCategory=agentQ-generated
+public sealed class {{RuleName}}Tests
+{
+    // AC-{{n}}: {{verbatim acceptance-criterion text}}
+    // Boundary lattice around {{the AC's threshold}}: just below / exactly at /
+    // just above. `double` in the attribute, converted to decimal in the body
+    // (attribute args can't be decimal — see header).
+    [TestCase(-0.01, false)]   // just below the boundary — must reject
+    [TestCase(0.00, true)]     // exactly at the boundary — AC says allowed
+    [TestCase(0.01, true)]     // just above — allowed
+    public void {{Method}}_TotalAtBoundary_{{RespectsRule}}(double totalRaw, bool expectedAccepted)
+    {
+        var total = (decimal)totalRaw;                    // restore money precision
+        var sut = new {{SutClass}}({{deterministicCtorArgs}});
+
+        var result = sut.{{Method}}(total);
+
+        // The single assertion that makes this non-vacuous: it fails on the base
+        // branch if the AC regresses. Asserting "did not throw" alone is banned.
+        result.{{Accepted}}.ShouldBe(expectedAccepted);
+    }
+
+    // AC-{{n}}: {{second behavior}} — a single named case where a table adds nothing.
+    // The input is the ACTUAL domain value from the ticket, never a placeholder 42.
+    [Test]
+    public void {{Method}}_{{Scenario}}_{{ExpectedOutcome}}()
+    {
+        var sut = new {{SutClass}}({{deterministicCtorArgs}});
+
+        var result = sut.{{Method}}({{concreteDomainValue}});
+
+        result.{{Property}}.ShouldBe({{expectedDomainValue}});
+    }
+}

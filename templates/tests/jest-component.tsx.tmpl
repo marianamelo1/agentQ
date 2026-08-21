@@ -1,0 +1,63 @@
+// agentQ style anchor — Jest component test (React Testing Library + MSW v1).
+// qa-scenario-writer: replace every {{token}}; keep the traceability comments.
+//
+// TRAPS this file encodes — do not "clean up":
+//  - ⚠ THE CLIENT REPO USES MSW **v1**. Handlers are `rest.get(...)` imported
+//    from 'msw', server from 'msw/node' setupServer. MSW v2's API
+//    (`import { http, HttpResponse } from 'msw'`) WILL NOT RUN here — `http`
+//    does not exist in v1 and the test dies at import time. Rendering v2
+//    handlers is the #1 way a generated Jest test fails on this repo.
+//  - Queries: role/label first (getByRole, getByLabelText, findByRole) — never
+//    a test-id when a role exists, never container.querySelector.
+//  - userEvent (async v14 API: `userEvent.setup()` + await) over fireEvent —
+//    real event sequences, not synthetic single events.
+//  - NO SNAPSHOTS: a snapshot asserts everything and therefore nothing; every
+//    assertion here traces to a named AC and fails if that AC regresses.
+//  - onUnhandledRequest:'error' — an unmocked network call fails LOUDLY instead
+//    of hanging or silently hitting a real service (loopback-only rule).
+
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { rest } from 'msw';                 // MSW v1 — NOT v2's `http`
+import { setupServer } from 'msw/node';
+import { {{Component}} } from '{{relative/path/into/src}}';
+
+// One MSW server per file; handlers reset between tests so per-test overrides
+// (see the 500 case below) never leak forward.
+const server = setupServer(
+  rest.get('{{/api/route}}', (req, res, ctx) =>
+    res(ctx.status(200), ctx.json({{deterministicFixture}}))
+  )
+);
+
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+describe('{{Component}}', () => {
+  // AC-{{n}}: {{verbatim acceptance-criterion text}}
+  it('{{rejects a negative total with a visible validation message}}', async () => {
+    const user = userEvent.setup();
+    render(<{{Component}} />);
+
+    await user.type(screen.getByLabelText(/{{total}}/i), '{{-1}}');
+    await user.click(screen.getByRole('button', { name: /{{save}}/i }));
+
+    // Non-vacuous: asserts the TICKET's wording, not just "some error shown" —
+    // fails on base if the AC's behavior regresses.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/{{must not be negative}}/i);
+  });
+
+  // AC-{{n}}: {{error-path behavior}} — override ONE handler for this test only
+  // (resetHandlers() in afterEach restores the happy path for the next test).
+  it('{{shows the failure state when the API returns 500}}', async () => {
+    server.use(
+      rest.get('{{/api/route}}', (req, res, ctx) => res(ctx.status(500)))
+    );
+    render(<{{Component}} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/{{could not load}}/i)
+    );
+  });
+});

@@ -1,0 +1,59 @@
+// agentQ configuration — committed template.
+// On a fresh clone: copy to .claude/qa-agent-config.jsonc (gitignored, machine-local)
+// and adjust the productRepos paths to where YOUR checkouts live.
+// When changing a project-wide default (not a machine-specific path), mirror the
+// change into this template — that's how defaults reach other machines.
+{
+  // GitHub slug → absolute path of the local checkout on THIS machine.
+  // agentQ only ever reads these repos (plus the one exception: generated tests
+  // the developer explicitly chooses to keep, applied as a reviewed diff).
+  "productRepos": {
+    "e-conomic/e-conomic": "C:\\dev\\e-conomic",
+    "e-conomic/client": "C:\\dev\\client",
+    "e-conomic/payroll-poc": "C:\\dev\\payroll-poc",
+    "e-conomic/Economic.ApiGateway": "C:\\dev\\Economic.ApiGateway"
+  },
+
+  // Per-repo settings. EVERY field is optional — agentQ infers what it can
+  // (base branch from origin/HEAD, frameworks per test project from manifests,
+  // OpenAPI spec paths from committed files, provider name from the assembly).
+  // Declare only what inference cannot know or gets wrong.
+  "repoSettings": {
+    "e-conomic/e-conomic": {
+      "jiraProjectKey": "EC",
+      // 426-project solution: never build it whole. The CI matrices are the
+      // authoritative test-project inventory (see CLAUDE.md, intake phase).
+      "testInventoryFromCi": [".github/workflows/unit_tests.yml", ".github/workflows/integration_tests.yml"]
+    },
+    "e-conomic/client": {
+      "jiraProjectKey": "EC"
+      // Nx repo: affected selection uses `nx affected --target=test` automatically.
+    },
+    "e-conomic/payroll-poc": {
+      "jiraProjectKey": "EC"
+    },
+    "e-conomic/Economic.ApiGateway": {
+      "jiraProjectKey": "EC",
+      "contract": {
+        // The gateway's API surface is its Ocelot route config, not controllers.
+        "ocelotRoutesGlob": "config/routes/*.ocelot.json"
+      }
+    }
+  },
+
+  // Run-level toggles (defaults shown).
+  "toggles": {
+    // "ask" = consent question in chat before the phase; "always" / "never" skip the question.
+    "mutationConsent": "ask",
+    "executionConsent": "ask",
+    // Opt-in unbounded mutation run (Stryker Standard level, whole changed files).
+    "deepMutation": false,
+    // Kick off background E2E scenario authoring on frontend branches (frontier work
+    // happens off the critical path either way; this disables it entirely).
+    "e2eAuthoring": true,
+    // Design conformance vs Figma frames linked in the ticket (frontend branches).
+    "figmaConformance": true,
+    // "concise" = verdict block + capability matrix only; "full" adds per-level detail inline.
+    "reportVerbosity": "full"
+  }
+}
