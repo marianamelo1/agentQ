@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "jira": {
+      "command": "node",
+      "args": ["${MCP_VISMA_JIRA_PATH}"],
+      "env": {
+        "JIRA_INTEGRATION_HUB_URL": "${JIRA_INTEGRATION_HUB_URL}",
+        "JIRA_PERSONAL_ACCESS_TOKEN": "${JIRA_PERSONAL_ACCESS_TOKEN}"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    }
+  }
+}

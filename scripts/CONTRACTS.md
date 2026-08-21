@@ -18,11 +18,11 @@ necessarily the registered one):
 ```json
 {
   "candidates": [
-    { "repoSlug": "e-conomic/payroll-poc", "repoPath": "C:\\dev\\payroll-poc-EC-8876",
+    { "repoSlug": "e-conomic/payroll-poc", "repoPath": "<local path>\\payroll-poc-EC-8876",
       "branch": "feature/EC-1234-vat-rounding", "matchedBy": "hint-in-branch-name" }
   ],
   "skipped": [
-    { "repoSlug": "e-conomic/client", "repoPath": "C:\\dev\\client", "reason": "path not found on this machine" }
+    { "repoSlug": "e-conomic/client", "repoPath": "<local path>\\client", "reason": "path not found on this machine" }
   ]
 }
 ```
@@ -54,7 +54,7 @@ explicitly (see `SKILL.md` Inputs):
 ```json
 {
   "repoSlug": "e-conomic/payroll-poc",
-  "repoPath": "C:\\dev\\payroll-poc",
+  "repoPath": "<local path>\\payroll-poc",
   "branch": "feature/EC-1234-vat-rounding",
   "baseRef": "origin/main",
   "baseSha": "<40-char merge-base sha, pinned once>",

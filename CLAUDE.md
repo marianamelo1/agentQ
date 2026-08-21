@@ -14,7 +14,7 @@ human-readable report under `reports/`.
 Invoke with something like: *"Review my branch for EC-1234 in the payroll repo"*,
 *"/qa-review payroll-poc"*, just *"Test my branch EC-8876"* with no repo named at
 all, or the explicit flag form `/qa-review --branch feature/EC-8876 --repo
-payroll-poc --worktree C:\dev\payroll-poc-EC-8876 --ticket EC-8876` — every one of
+payroll-poc --worktree <local-path>\payroll-poc-EC-8876 --ticket EC-8876` — every one of
 those four is optional and order-independent (`.claude/skills/qa-review/SKILL.md`
 Inputs). The repo/worktree doesn't need to be stated: since the branch under review
 must already be checked out locally (see Preconditions), agentQ finds it by scanning
@@ -36,16 +36,22 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
    must contain the branch under review — agentQ never clones, pulls, or checks out
    branches itself; it reviews what's there (after a `git fetch` for a fresh
    merge-base). This precondition is also what makes repo auto-detect possible: if
-   the developer doesn't name a repo, agentQ finds it by scanning every registered
-   repo's currently-checked-out branch (see Phase 0).
+   the developer doesn't name a repo, agentQ finds it by scanning every worktree of
+   every registered repo — not just each one's currently-checked-out branch (see
+   Phase 0).
 2. `.env` exists if a lane needs it (copy from `.env.example`) — local-dev URLs for
    E2E, Pact broker token for the contract lane. Missing values degrade the lane
    honestly; they never block the rest of the review.
-3. MCPs — verify with `/mcp`: **Jira** (AC extraction; degradable to pasted AC text),
-   **Playwright** (E2E authoring + design-conformance screenshots; frontend branches
-   only), **Figma** (design conformance; only when the ticket links a design). No
-   other MCP is used — everything else is CLI (`git`, `dotnet`, `npx jest`/`nx`,
-   `dotnet stryker`, `npx playwright test`, `oasdiff`).
+3. MCPs — **Jira** and **Playwright** are pre-declared in `.mcp.json` (approve once
+   when Claude Code prompts on first open); Jira needs `MCP_VISMA_JIRA_PATH` and
+   `JIRA_PERSONAL_ACCESS_TOKEN` set as real OS environment variables (never in
+   agentQ's own `.env` — `.mcp.json` substitution reads the process environment,
+   and a token value must never land in a file agentQ manages). **Figma** is a
+   claude.ai connector (account-level OAuth), authorized once outside this repo —
+   only needed when the ticket links a design on a frontend branch. Verify all
+   three with `/mcp`. Jira is degradable to pasted AC text; Playwright/Figma are
+   frontend-branch-only. No other MCP is used — everything else is CLI (`git`,
+   `dotnet`, `npx jest`/`nx`, `dotnet stryker`, `npx playwright test`, `oasdiff`).
 4. .NET SDK on PATH for .NET repos (`dotnet --list-sdks`), Node ≥ the repo's engines
    for JS repos. Docker only matters for consented Testcontainers/compose paths.
 5. One-time per repo, offered on first run (consented, never silent): local

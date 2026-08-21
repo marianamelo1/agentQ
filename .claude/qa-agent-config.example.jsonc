@@ -8,10 +8,10 @@
   // agentQ only ever reads these repos (plus the one exception: generated tests
   // the developer explicitly chooses to keep, applied as a reviewed diff).
   "productRepos": {
-    "e-conomic/e-conomic": "C:\\dev\\e-conomic",
-    "e-conomic/client": "C:\\dev\\client",
-    "e-conomic/payroll-poc": "C:\\dev\\payroll-poc",
-    "e-conomic/Economic.ApiGateway": "C:\\dev\\Economic.ApiGateway"
+    "e-conomic/e-conomic": "<absolute path to your e-conomic checkout>",
+    "e-conomic/client": "<absolute path to your client checkout>",
+    "e-conomic/payroll-poc": "<absolute path to your payroll-poc checkout>",
+    "e-conomic/Economic.ApiGateway": "<absolute path to your Economic.ApiGateway checkout>"
   },
 
   // Per-repo settings. EVERY field is optional — agentQ infers what it can

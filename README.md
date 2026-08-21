@@ -22,14 +22,27 @@ The full workflow, safety rules, and phase-by-phase detail live in
      (point `productRepos` at your real local checkouts)
    - `.env.example` → `.env` (only needed for the E2E and Pact lanes; missing
      values degrade those lanes honestly, they never block the review)
-3. Run `/mcp` and check the connectors: **Jira** (AC extraction), **Playwright**
-   and **Figma** (frontend branches only). Everything else is plain CLI.
+3. Set up the three MCPs (see **MCP setup** below) — Jira and Playwright are
+   pre-declared in [`.mcp.json`](.mcp.json) and need only two environment
+   variables; Figma is a one-time claude.ai connector.
 4. Check out the branch under review in the product repo (agentQ never clones,
    pulls, or switches branches — it reviews what's there, including uncommitted
    and untracked work).
 5. Say: **"Review my branch for EC-1234 in the payroll repo"**, `/qa-review payroll-poc`,
    or just **"Test my branch EC-8876"** — the repo name is optional; agentQ finds it
    by checking which registered repo has a matching branch checked out.
+
+## MCP setup
+
+[`.mcp.json`](.mcp.json) already declares Jira and Playwright — approve them
+once when Claude Code prompts on first open.
+
+1. **Jira** — clone `mcp-visma-jira`, then set env vars `MCP_VISMA_JIRA_PATH`
+   (path to its `index.js`), `JIRA_INTEGRATION_HUB_URL` (value is in that
+   repo's own README), and `JIRA_PERSONAL_ACCESS_TOKEN` (Jira → Profile →
+   Personal Access Tokens).
+2. **Figma** — authorize once via claude.ai connector settings (frontend
+   branches only).
 
 ## Command-line style invocation
 
@@ -49,7 +62,7 @@ plain language:
 /qa-review EC-8876
 /qa-review --repo payroll-poc --branch feature/EC-8876
 /qa-review --worktree payroll-poc-EC-8876
-/qa-review --worktree C:\dev\payroll-poc-EC-8876
+/qa-review --worktree <local-path>\payroll-poc-EC-8876
 /qa-review --branch feature/EC-8876 --repo payroll-poc --ticket EC-8876
 ```
 
