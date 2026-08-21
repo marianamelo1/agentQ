@@ -204,3 +204,70 @@ is measured wall-clock for the whole run, not the sum of the `phases` column (ph
 that overlap by design — Phase 4 with Phases 2–3, model work with CPU work — make
 the sum larger than reality). `qa-report-synthesizer` reads all three fields
 verbatim; it never recomputes a total or reclassifies who ran what.
+
+## impact-index.json  (impact-index.ps1 — Phase 1b of every /qa-review + the standalone /qa-impact)
+Static blast-radius index. Never builds, boots, or executes anything; read-only scan
+of `productRepos` ∪ `testRepos` (config). Seeds come from the branch diff
+(`-Manifest`, branch mode) or verbatim from `-Targets "term1,term2"` (target mode:
+endpoint path, `Table`/`Table.Column`, type/method name, or file path).
+```json
+{
+  "mode": "branch",                    // branch | target
+  "seeds": [
+    { "kind": "endpoint", "value": "POST /api/entries", "from": "src/payroll/EntriesController.cs:24" },
+    { "kind": "table", "value": "Entries.PostingDate", "from": "migrations/20260812_AddPostingDate.cs:9" }
+  ],
+  "droppedSeeds": [{ "value": "Name", "reason": "low-signal — too generic to match on" }],
+  "matches": [
+    { "repoSlug": "e-conomic/client", "indexOnly": false,
+      "file": "src/api/entries.ts", "line": 12,
+      "seed": "POST /api/entries", "matchKind": "endpoint-reference",
+      "context": "<the matching source line, trimmed>" }
+  ],
+  "reverseCoverage": {
+    "available": false, "reason": "no coverage artifact for this branch",
+    "tests": [{ "fqn": "…", "coversChangedLines": 6 }]
+  },
+  "scanned": [{ "repoSlug": "e-conomic/client", "files": 1240, "seconds": 2.9 }],
+  "skipped": [{ "repoSlug": "e-conomic/ui-automation", "reason": "path not found on this machine" }]
+}
+```
+Seed kinds: `endpoint | symbol | dto | table | column | file`. In branch mode the
+script extracts them from the diff: routes from `[Route]`/`[Http*]`/`Map*(`/Ocelot
+configs, tables/columns from changed migration files, type/method names from changed
+hunks. Generic identifiers (short names, common words) are dropped into
+`droppedSeeds` — a match on `Name` is noise, not impact. `matchKind`:
+`endpoint-reference | symbol-reference | dto-reference | table-reference |
+route-config | package-reference`. `indexOnly: true` marks matches from
+`testRepos` (e.g. the UI-automation repo) — always reported as
+*candidates*, never as verified impact. `reverseCoverage` is filled from this
+branch's existing `diff-coverage`/`test-results` artifacts when a prior `/qa-review`
+produced them — the script never generates coverage itself. Testomatio results are
+deliberately NOT in this file: they come from session-dependent MCP queries made by
+the orchestrator (the MCP may not exist on a given machine) and land in
+`testomat-candidates.json` (below), always labeled candidates.
+
+## testomat-candidates.json  (orchestrator, Phase 1b — session-dependent, ALWAYS written)
+Written by the orchestrator, not a script: Testomatio is reachable only through an
+MCP server each developer configures in their own Claude Code session, so
+availability differs per machine. Probe first; never assume. The file is written
+whenever the impact phase runs (`toggles.skipQaImpact: false`, or the standalone
+`/qa-impact`) — `status` carries the honesty when the lane couldn't run. It does
+not exist on runs where `skipQaImpact` (default `true`) skipped the phase.
+```json
+{
+  "status": "RAN",   // "RAN" | "SKIPPED — Testomatio MCP not configured" | "DEGRADED — <query error>"
+  "queriedBy": ["POST /api/entries", "ticket component: Entries"],
+  "candidates": [
+    { "id": "T1a2b3c", "title": "Create entry with posting date", "suite": "Entries",
+      "matchedSeed": "POST /api/entries", "url": "<testomat test url>" }
+  ]
+}
+```
+Candidates are keyword matches — consumers (qa-analyst, qa-report-synthesizer) may
+present them ONLY as *candidates (keyword match)*, never as affected or failed.
+qa-report-synthesizer copies `status` verbatim into the Impact matrix row. A missing
+file on a run where the impact phase RAN (per the time-ledger) means the
+orchestrator skipped a step — treat as `DEGRADED — artifact missing`; on a
+config-skipped run the row reads `SKIPPED — disabled by config`. Either way, never
+silently omit the row.

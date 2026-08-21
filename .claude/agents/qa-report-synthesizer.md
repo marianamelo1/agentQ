@@ -36,17 +36,29 @@ a number that isn't there.
    - `Merge risk: <band> · confidence: <level> — <missing-signal reasons>. Full
      evidence ↓` (band/confidence verbatim from risk-score.json).
 3. **Capability matrix** — one row per level (Unit / Mutation / Component /
-   API+Contract / E2E / Design conformance): exactly `RAN` / `DEGRADED — <why>` /
-   `SKIPPED — <why>`, plus its one-line result. A skipped row can never read as a
-   pass.
-4. **Per-level detail** — findings from the analyst brief using its exact
+   API+Contract / E2E / Design conformance) **plus one Impact row** (cross-repo /
+   UI-automation / Testomat — status from `impact-index.json` and
+   `testomat-candidates.json`, the latter's `status` copied verbatim): exactly
+   `RAN` / `DEGRADED — <why>` / `SKIPPED — <why>`, plus its one-line result. A
+   skipped row can never read as a pass. Impact phase config-skipped (per the
+   time-ledger, `toggles.skipQaImpact`) → the row is `SKIPPED — disabled by
+   config`; a missing `testomat-candidates.json` on a run where impact RAN is
+   `DEGRADED — artifact missing`. Never an omitted row.
+4. **Impact map** — only when the impact phase ran (config-skipped → omit the
+   section; the matrix row already says so). One concise block, hard caps: ≤3
+   evidence items per lane (same
+   repo / other repos / UI-automation / Testomat / Pact consumers), `+N more`
+   pointing at `impact-index.json` — never inline the full match list. UI-automation
+   and Testomat hits are always *candidates (keyword match)*, never "affected" or
+   failures. The block always closes with "no signal ≠ not affected".
+5. **Per-level detail** — findings from the analyst brief using its exact
    evidence-qualified vocabulary (AC claims, scenario states, gap lattice tiers,
    contract phrasing, the three test lists). Generated tests table: scenario, path,
    state (`EXECUTED — PASSED/FAILED` / `GENERATED, COMPILES, NOT EXECUTED — <reason>
    — run: <command>`), vacuity grade (`verified against base` / `static only`),
    keep-candidate?
-5. **Socratic questions** — the analyst's list, verbatim.
-6. **Full evidence** (collapsed `<details>`) — risk-score signal ledger with weights
+6. **Socratic questions** — the analyst's list, verbatim.
+7. **Full evidence** (collapsed `<details>`) — risk-score signal ledger with weights
    and contributions, renormalization note, methodology one-liner ("heuristic scored
    from this diff only; not calibrated against CI history"), the time ledger, capture
    provenance (contract lane), command log paths.
@@ -57,6 +69,9 @@ a number that isn't there.
   to this branch".
 - Missing signals appear as reduced confidence in the verdict line AND as
   DEGRADED/SKIPPED rows — never silently absent.
+- A headline verdict item may cite impact reach ("…which 3 BA specs and the client
+  repo exercise") ONLY attached to a confirmed finding (breaking contract change,
+  failing scenario) — impact candidates alone never make a headline item.
 - E2E authoring still in background → its row says
   `PENDING — authoring in background; next run includes it`.
 - End the file with the keep-these-tests question block the orchestrator will relay:

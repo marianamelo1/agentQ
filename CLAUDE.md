@@ -50,13 +50,25 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
    claude.ai connector (account-level OAuth), authorized once outside this repo —
    only needed when the ticket links a design on a frontend branch. Verify all
    three with `/mcp`. Jira is degradable to pasted AC text; Playwright/Figma are
-   frontend-branch-only. No other MCP is used — everything else is CLI (`git`,
+   frontend-branch-only. **Testomatio** is the fourth: each developer configures it
+   in their own Claude Code session (NOT bundled in `.mcp.json`; token as an OS env
+   var, never in `.env`) — the impact phase consults it on every run, probing first
+   and reporting `SKIPPED — Testomatio MCP not configured` when absent. Never
+   assume it exists because it exists on another machine. No other MCP is used —
+   everything else is CLI (`git`,
    `dotnet`, `npx jest`/`nx`, `dotnet stryker`, `npx playwright test`, `oasdiff`).
 4. .NET SDK on PATH for .NET repos (`dotnet --list-sdks`), Node ≥ the repo's engines
    for JS repos. Docker only matters for consented Testcontainers/compose paths.
 5. One-time per repo, offered on first run (consented, never silent): local
    `dotnet-stryker` tool restore, `oasdiff` pinned-binary download into `tools/`
    (checksum-verified), Playwright browsers (frontend repos).
+6. Impact lanes (Phase 1b — opt-in: enabled by `toggles.skipQaImpact: false`; the
+   default `true` skips the phase, shown honestly as `SKIPPED — disabled by config`
+   in the report's Impact row): `testRepos` in the config points at the local
+   UI-automation (BA) test repo checkout — its own config slot, never
+   `productRepos` (test repos are scanned for references only, never reviewed or
+   built; future entries: API-testing, performance repos). Missing path or missing Testomatio MCP → a DEGRADED/SKIPPED Impact row
+   in the report; never a blocked run, never a silent hole.
 
 ## Safety rules (non-negotiable)
 
@@ -181,6 +193,24 @@ Load calibration.
   (`[ApiController]`, `[Route(`, `[Http*]`, `Map*(`, `ProducesResponseType`,
   DTO-path files). Pact detected independently (packages, pact JSONs, broker env).
 
+### Phase 1b — Impact (script + MCP queries, 5–15 s; gated by `toggles.skipQaImpact`)
+Check `toggles.skipQaImpact` first (default `true` = skip): skipping records the
+phase as `SKIPPED — disabled by config (skipQaImpact)` in the time-ledger — the
+report still shows the Impact row with exactly that status, never an omitted row —
+and no impact artifacts are expected. `false` → run:
+`scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>`: seeds extracted from
+the diff set (routes, symbols, DTOs, migration tables/columns), scanned across
+`productRepos` ∪ `testRepos` — the UI-automation (BA) repo lives in the
+latter — into `impact-index.json`. Then the orchestrator consults Testomat itself:
+probe whether a Testomatio MCP is available in THIS session (developer-configured,
+not bundled — never assume); available → search tests/suites by the seeds + the
+ticket's component → `testomat-candidates.json`; absent → the same file with
+`status: "SKIPPED — Testomatio MCP not configured"` (always written). Overlaps
+Phases 2–3 (pure scan + MCP I/O, no build contention). Feeds qa-analyst (cross-repo
+fan-in) and the report's impact map + Impact matrix row. UI-automation and Testomat
+hits are always **candidates** (keyword evidence), never "affected". Never blocks:
+a failure here degrades the Impact row only.
+
 ### Phase 2 — Unit level (scripts, 30–90 s; one artifact, four consumers)
 `scripts/run-tests.ps1`: build the affected project graph once (**never the whole
 e-conomic solution**), then everything `--no-build --no-restore`. Coverage wraps the
@@ -207,7 +237,9 @@ test is flaky".
 
 ### Phase 4 — Analysis & authoring (agents, overlaps Phases 2–3)
 Dispatch qa-analyst and (on cache miss) qa-scenario-writer together, in the same
-message. qa-analyst: regression risk, AC alignment, Socratic questions under the
+message. qa-analyst: regression risk (including cross-repo fan-in from
+`impact-index.json` / `testomat-candidates.json`), AC alignment, Socratic questions
+under the
 contract (≤5; each anchored to file:line evidence — an uncovered branch, a surviving
 mutant, an unmet AC; answerable by one nameable test; embeds the actual domain
 value; suppressed if an existing test answers it). Written QA-style — leads with
@@ -302,7 +334,8 @@ Run summary right under the header table (which agents were actually called this
 run, a Phase/Actor/Seconds table, total wall-clock — all verbatim from
 `time-ledger.json`, which the orchestrator appends to as each phase completes),
 then the consequence-first verdict block (see Reporting below), capability matrix,
-per-level detail, Socratic questions, collapsed Full-evidence section (signal
+impact map (concise — see Reporting), per-level detail, Socratic questions,
+collapsed Full-evidence section (signal
 ledger, weights, methodology, the same phases again with outcome instead of
 actor). Save to
 `reports/<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md` (+ evidence dir).
@@ -343,7 +376,8 @@ files, staging E2E not run. Full evidence ↓
 A clean run gets the inverse — `🟢 Ready to open — nothing blocking found` + the ✅
 line — because telling a developer they're *done* is what builds the habit.
 
-- Capability matrix: one row per level, exactly one of `RAN` / `DEGRADED — <why>` /
+- Capability matrix: one row per level **plus one Impact row** (cross-repo /
+  UI-automation / Testomat), exactly one of `RAN` / `DEGRADED — <why>` /
   `SKIPPED — <why>`. A skipped stage can never read as a pass.
 - Scenario states, only: `EXECUTED — PASSED` / `EXECUTED — FAILED (finding)` /
   `GENERATED, COMPILES, NOT EXECUTED — <reason> — run: <command>` /
@@ -358,6 +392,15 @@ line — because telling a developer they're *done* is what builds the habit.
 - Contract: ERR → "breaking change to the documented API contract (rule <id>) — any
   consumer relying on this shape will break"; WARN → "potentially breaking — needs
   human judgment"; only Pact findings may name a consumer.
+- Impact matrix row appears in every report; the impact map section only when the
+  phase ran (config-skipped → the row alone says `SKIPPED — disabled by config`).
+- Impact map (when the phase ran): one concise block — ≤3 evidence items per lane (same
+  repo / other repos / UI-automation / Testomat / Pact consumers), `+N more`
+  pointing at `impact-index.json`; UI-automation and Testomat hits are always
+  *candidates (keyword match)*, never "affected" or failures; always closes with
+  "no signal ≠ not affected". A headline verdict item may cite impact reach only
+  when attached to a confirmed finding (e.g. a breaking contract change whose
+  endpoint named BA specs exercise).
 - Diff coverage is always "coverage of changed lines, from tests related to this
   branch" — never presented as a global percentage.
 - Never "riskiest tests" — three named lists: *most likely to catch a regression
@@ -370,11 +413,30 @@ line — because telling a developer they're *done* is what builds the habit.
 | Agent | Judgment it owns | Spawns |
 |---|---|---|
 | `qa-intake` | Diff classification, adapter profiles, Jira ACs + Figma links, bootability/outbound/contract probes | every run |
-| `qa-analyst` | Regression risk, AC alignment, Socratic questions, flaky/oasdiff/Pact interpretation — from script JSON only | every run |
+| `qa-analyst` | Regression risk, AC alignment, Socratic questions, flaky/oasdiff/Pact/impact interpretation — from script JSON only | every run |
 | `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile | cache miss |
 | `qa-mutation-author` | The 3–8 business-rule mutants | mutation consented |
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
 | `qa-report-synthesizer` | The final report | every run |
+
+## /qa-impact — blast-radius analysis (standalone entry point)
+
+"What could my change affect?" — same-repo features, other repos, UI-automation
+(BA) specs, Testomat tests — for a branch diff or a named `--target` (endpoint,
+table, symbol) before any code exists. The same lanes run inside `/qa-review`
+(Phase 1b — same script, same artifacts) when `toggles.skipQaImpact` is set to
+`false` (the default `true` skips them, honestly reported); this skill is the
+standalone entry for asking without a review and **ignores that toggle** — explicit
+invocation always runs. Static and strictly read-only:
+`scripts/impact-index.ps1` extracts seeds from the diff (routes, symbols, DTOs,
+migration tables) and scans `productRepos` ∪ `testRepos` for
+references (`impact-index.json`, CONTRACTS.md). Existing-test and Pact lanes reuse
+prior `/qa-review` artifacts, never generate their own. The Testomat lane runs
+only when a Testomatio MCP is configured in the current session — probed per run,
+never assumed present, never required; absent → `SKIPPED`. Output is a
+deliberately concise impact map: ≤3 evidence items per lane with `+N more`
+pointing at the artifact, textual UI/Testomat hits always labeled *candidates*,
+closing with "no signal ≠ not affected". Details: `.claude/skills/qa-impact/SKILL.md`.
 
 ## Roadmap (Phase 2 — explicitly not built yet)
 

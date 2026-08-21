@@ -39,9 +39,10 @@ the orchestrator — dense facts, no prose padding.
      project (read `.github/workflows/pr-build-backend.yml`'s test_placement job);
      encode it. Other repos: empty (unrestricted).
    - e-conomic (426 projects): derive the test-project inventory from the CI
-     matrices listed in config `testInventoryFromCi`, mapping changed source
-     projects → test projects via ProjectReference; filename globs only as
-     fallback. NEVER enumerate or build the whole solution.
+     matrices (`.github/workflows/unit_tests.yml` +
+     `.github/workflows/integration_tests.yml` — the authoritative list), mapping
+     changed source projects → test projects via ProjectReference; filename globs
+     only as fallback. NEVER enumerate or build the whole solution.
    - `runner`: `mtp` only if global.json has a "test" runner key or
      Microsoft.Testing.Platform packages exist (none of the four repos today — if
      found, flag it: mutation must be reported DEGRADED).

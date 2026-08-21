@@ -68,12 +68,27 @@ intent, then map onto these four slots:
    reports no diff vs base → tell the user there's nothing to review; stop.
    If no ticket/AC source → ask the user to paste ACs or continue with
    AC-alignment UNVERIFIABLE.
+2b. **Impact (gated by `toggles.skipQaImpact`, never blocking)** — check the toggle
+   first: `true` (the default) → record `SKIPPED — disabled by config
+   (skipQaImpact)` in the time-ledger and skip to step 3 (the report still shows
+   the Impact row with that status). `false` → `scripts/impact-index.ps1 -Manifest
+   <path> -ConfigPath <cfg>` (seeds from the diff set; scans `productRepos` ∪
+   `testRepos` — the UI-automation/BA repo lives in the latter) →
+   `impact-index.json`. Then consult Testomat yourself: probe whether a Testomatio
+   MCP is available in THIS session (developer-configured, not bundled — never
+   assume it's installed); available → search tests/suites by the seeds + ticket
+   component; ALWAYS write `testomat-candidates.json` (status `SKIPPED — Testomatio
+   MCP not configured` when absent). Stream one line ("Impact: client 4 refs · 3 BA
+   specs · 5 Testomat candidates"). Overlaps step 3; a failure here degrades the
+   Impact row only, nothing else.
 3. **Unit + flaky** — `scripts/run-tests.ps1 -Manifest <path>` then
    `scripts/diff-coverage.ps1`. Stream one-liners ("Unit: 43/43 affected tests
    passed · changed-line coverage 54%").
 4. **Analysis & authoring** — in the SAME message dispatch `qa-analyst` (always) and
    `qa-scenario-writer` (only if the scenario cache is stale for this
-   diff/AC hash). They overlap step 3's CPU work.
+   diff/AC hash). They overlap step 3's CPU work. If step 2b ran, point
+   `qa-analyst` at `impact-index.json` + `testomat-candidates.json` too —
+   cross-repo fan-in is part of its regression-risk brief.
 5. **💬 Mutation consent** (per `toggles.mutationConsent`; auto-skip if no backend
    change): show scope + calibrated estimate. On yes:
    `qa-mutation-author` designs semantic mutants →
@@ -88,7 +103,9 @@ intent, then map onto these four slots:
    `scripts/contract-check.ps1`. Frontend branches: run cached E2E specs
    (`npx playwright test --grep @agentq`); kick off `qa-e2e-author` in the
    background for new scenarios and (if a Figma link exists) design conformance.
-8. **Report** — delegate `qa-report-synthesizer` with the workspace dir. Save under
+8. **Report** — delegate `qa-report-synthesizer` with the workspace dir (it renders
+   the Impact matrix row + the concise impact map from `impact-index.json` /
+   `testomat-candidates.json`). Save under
    `reports/`, show the verdict block in chat, then ask which generated tests to
    keep; on explicit yes apply them to the product repo as a reviewed diff
    (placement per adapter profile).
@@ -100,5 +117,8 @@ intent, then map onto these four slots:
   consent — all become explicit `SKIPPED/DEGRADED — <why>` lines. Never a pass.
 - Never write into the product repo except step 8's consented keep-tests diff.
 - Never publish Pact results; never echo secret values.
+- UI-automation and Testomat matches are *candidates (keyword evidence)* — never
+  "affected", never failures. The Impact row follows the same SKIPPED/DEGRADED
+  honesty as every other lane; never assume any MCP exists on this machine.
 - Background `qa-e2e-author` results arrive after the report — relay them as an
   addendum, don't block.
