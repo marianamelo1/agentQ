@@ -42,20 +42,19 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 2. `.env` exists if a lane needs it (copy from `.env.example`) — local-dev URLs for
    E2E, Pact broker token for the contract lane. Missing values degrade the lane
    honestly; they never block the rest of the review.
-3. MCPs — **Jira** and **Playwright** are pre-declared in `.mcp.json` (approve once
-   when Claude Code prompts on first open); Jira needs `MCP_VISMA_JIRA_PATH` and
-   `JIRA_PERSONAL_ACCESS_TOKEN` set as real OS environment variables (never in
+3. MCPs — **Jira**, **Playwright**, and **Testomatio** are pre-declared in
+   `.mcp.json` (approve once when Claude Code prompts on first open); Jira needs
+   `MCP_VISMA_JIRA_PATH` + `JIRA_PERSONAL_ACCESS_TOKEN`, Testomatio needs
+   `TESTOMATIO_API_TOKEN` — all set as real OS environment variables (never in
    agentQ's own `.env` — `.mcp.json` substitution reads the process environment,
    and a token value must never land in a file agentQ manages). **Figma** is a
    claude.ai connector (account-level OAuth), authorized once outside this repo —
    only needed when the ticket links a design on a frontend branch. Verify all
-   three with `/mcp`. Jira is degradable to pasted AC text; Playwright/Figma are
-   frontend-branch-only. **Testomatio** is the fourth: each developer configures it
-   in their own Claude Code session (NOT bundled in `.mcp.json`; token as an OS env
-   var, never in `.env`) — the impact phase consults it on every run, probing first
-   and reporting `SKIPPED — Testomatio MCP not configured` when absent. Never
-   assume it exists because it exists on another machine. No other MCP is used —
-   everything else is CLI (`git`,
+   four with `/mcp`. Jira is degradable to pasted AC text; Playwright/Figma are
+   frontend-branch-only; Testomatio is probed by the impact phase on every run and
+   reports `SKIPPED — Testomatio MCP not configured` when its token/server is
+   missing on a machine — never assume it works because it works elsewhere. No
+   other MCP is used — everything else is CLI (`git`,
    `dotnet`, `npx jest`/`nx`, `dotnet stryker`, `npx playwright test`, `oasdiff`).
 4. .NET SDK on PATH for .NET repos (`dotnet --list-sdks`), Node ≥ the repo's engines
    for JS repos. Docker only matters for consented Testcontainers/compose paths.
@@ -202,8 +201,9 @@ and no impact artifacts are expected. `false` → run:
 the diff set (routes, symbols, DTOs, migration tables/columns), scanned across
 `productRepos` ∪ `testRepos` — the UI-automation (BA) repo lives in the
 latter — into `impact-index.json`. Then the orchestrator consults Testomat itself:
-probe whether a Testomatio MCP is available in THIS session (developer-configured,
-not bundled — never assume); available → search tests/suites by the seeds + the
+probe whether a Testomatio MCP is available in THIS session (pre-declared in
+`.mcp.json`, but its token is per-machine — never assume it works); available →
+search tests/suites by the seeds + the
 ticket's component → `testomat-candidates.json`; absent → the same file with
 `status: "SKIPPED — Testomatio MCP not configured"` (always written). Overlaps
 Phases 2–3 (pure scan + MCP I/O, no build contention). Feeds qa-analyst (cross-repo

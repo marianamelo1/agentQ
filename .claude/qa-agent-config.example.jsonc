@@ -11,12 +11,7 @@
 
   // One Jira project for all repos.
   "jiraProjectKey": "EC",
-
-  // Test repos — scanned by the impact phase for affected tests. Never reviewed,
-  // never built. Add future ones here (API testing, performance, …).
-  // The Testomat lane also needs a Testomatio MCP in your Claude Code session
-  // (token as an OS env var). Missing path or MCP → SKIPPED/DEGRADED in the report.
-  "testRepos": {
+"testRepos": {
     "e-conomic/ui-automation": "<absolute path to your ui-automation checkout>"
   },
 

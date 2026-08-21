@@ -248,9 +248,9 @@ the orchestrator (the MCP may not exist on a given machine) and land in
 `testomat-candidates.json` (below), always labeled candidates.
 
 ## testomat-candidates.json  (orchestrator, Phase 1b — session-dependent, ALWAYS written)
-Written by the orchestrator, not a script: Testomatio is reachable only through an
-MCP server each developer configures in their own Claude Code session, so
-availability differs per machine. Probe first; never assume. The file is written
+Written by the orchestrator, not a script: Testomatio's MCP server is pre-declared
+in `.mcp.json` but needs a per-machine `TESTOMATIO_API_TOKEN`, so availability
+differs per machine. Probe first; never assume. The file is written
 whenever the impact phase runs (`toggles.skipQaImpact: false`, or the standalone
 `/qa-impact`) — `status` carries the honesty when the lane couldn't run. It does
 not exist on runs where `skipQaImpact` (default `true`) skipped the phase.

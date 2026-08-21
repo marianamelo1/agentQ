@@ -40,12 +40,13 @@ Same four optional slots as `/qa-review` (`--branch` / `--repo` / `--worktree` /
    coverage artifact **if a prior `/qa-review` produced one**; otherwise that lane
    is `SKIPPED — no coverage artifact (run /qa-review to get it)`. Never generate
    coverage from this skill.
-4. **Testomat lane (optional, session-dependent)** — probe whether a Testomatio
-   MCP server is available **in this session** (attempt tool discovery; do NOT
-   assume it exists because it exists on any other machine — this repo's
-   `.mcp.json` does not bundle it). Unavailable → `SKIPPED — Testomatio MCP not
-   configured` plus a one-line enable hint (configure the Testomatio MCP server in
-   your own Claude Code; token as an OS env var, never in `.env`). Available →
+4. **Testomat lane (session-dependent)** — probe whether a Testomatio MCP server
+   is available **in this session** (attempt tool discovery; the server is
+   pre-declared in this repo's `.mcp.json` but needs `TESTOMATIO_API_TOKEN` set on
+   the machine — do NOT assume it works because it works elsewhere). Unavailable →
+   `SKIPPED — Testomatio MCP not configured` plus a one-line enable hint (set
+   `TESTOMATIO_API_TOKEN` as an OS env var and approve the server — never in
+   `.env`). Available →
    search tests/suites by the seeds and the ticket's component; every hit is a
    **candidate (keyword match)** — never "affected". Either way, ALWAYS write
    `testomat-candidates.json` (CONTRACTS.md) — `status` carries the honesty.

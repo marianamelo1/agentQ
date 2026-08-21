@@ -11,6 +11,20 @@
     "playwright": {
       "command": "npx",
       "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "testomatio": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@testomatio/mcp@2.1.2",
+        "--token",
+        "${TESTOMATIO_API_TOKEN}",
+        "--project",
+        "e-conomic-web"
+      ],
+      "env": {
+        "TESTOMATIO_BASE_URL": "https://app.testomat.io"
+      }
     }
   }
 }

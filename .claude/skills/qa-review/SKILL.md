@@ -75,8 +75,9 @@ intent, then map onto these four slots:
    <path> -ConfigPath <cfg>` (seeds from the diff set; scans `productRepos` ∪
    `testRepos` — the UI-automation/BA repo lives in the latter) →
    `impact-index.json`. Then consult Testomat yourself: probe whether a Testomatio
-   MCP is available in THIS session (developer-configured, not bundled — never
-   assume it's installed); available → search tests/suites by the seeds + ticket
+   MCP is available in THIS session (pre-declared in `.mcp.json`, but its
+   `TESTOMATIO_API_TOKEN` is per-machine — never assume it's working); available →
+   search tests/suites by the seeds + ticket
    component; ALWAYS write `testomat-candidates.json` (status `SKIPPED — Testomatio
    MCP not configured` when absent). Stream one line ("Impact: client 4 refs · 3 BA
    specs · 5 Testomat candidates"). Overlaps step 3; a failure here degrades the
