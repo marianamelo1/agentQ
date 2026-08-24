@@ -68,6 +68,12 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
    `productRepos` (test repos are scanned for references only, never reviewed or
    built; future entries: API-testing, performance repos). Missing path or missing Testomatio MCP → a DEGRADED/SKIPPED Impact row
    in the report; never a blocked run, never a silent hole.
+7. Manual-test recommendation (Phase 1c — opt-**out**: enabled by default,
+   disabled by `toggles.skipManualTestAnalysis: true`): the opposite default of
+   precondition 6 above, on purpose — the whole point is a developer sees it
+   unless they deliberately turn it off. Shares Phase 1b's seed extraction, so it
+   still runs even when `skipQaImpact` skips the Impact map itself. Same
+   Testomatio MCP dependency and degrade-honestly behavior as Phase 1b.
 
 ## Safety rules (non-negotiable)
 
@@ -195,23 +201,48 @@ Load calibration.
   DTO-path files). Pact detected independently (packages, pact JSONs, broker env).
 
 ### Phase 1b — Impact (script + MCP queries, 5–15 s; gated by `toggles.skipQaImpact`)
-Check `toggles.skipQaImpact` first (default `true` = skip): skipping records the
-phase as `SKIPPED — disabled by config (skipQaImpact)` in the time-ledger — the
-report still shows the Impact row with exactly that status, never an omitted row —
-and no impact artifacts are expected. `false` → run:
+`scripts/impact-index.ps1` runs whenever `skipQaImpact` is `false` OR Phase 1c's
+`skipManualTestAnalysis` is `false` (the default) — Phase 1c needs these same
+seeds, so the script isn't run twice for one workspace. Both toggles `true` → skip
+entirely: records the phase as `SKIPPED — disabled by config (skipQaImpact)` in the
+time-ledger — the report still shows the Impact row with exactly that status, never
+an omitted row — and no impact artifacts are expected. Otherwise:
 `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>`: seeds extracted from
 the diff set (routes, symbols, DTOs, migration tables/columns), scanned across
 `productRepos` ∪ `testRepos` — the UI-automation (BA) repo lives in the
-latter — into `impact-index.json`. Then the orchestrator consults Testomat itself:
-probe whether a Testomatio MCP is available in THIS session (pre-declared in
-`.mcp.json`, but its token is per-machine — never assume it works); available →
+latter — into `impact-index.json`. If `skipQaImpact` itself is `false`, the
+orchestrator also consults Testomat for cross-repo candidates: probe whether a
+Testomatio MCP is available in THIS session (pre-declared in `.mcp.json`, but its
+token is per-machine — never assume it works); available →
 search tests/suites by the seeds + the
 ticket's component → `testomat-candidates.json`; absent → the same file with
-`status: "SKIPPED — Testomatio MCP not configured"` (always written). Overlaps
+`status: "SKIPPED — Testomatio MCP not configured"` (written whenever `skipQaImpact`
+is false). Overlaps
 Phases 2–3 (pure scan + MCP I/O, no build contention). Feeds qa-analyst (cross-repo
 fan-in) and the report's impact map + Impact matrix row. UI-automation and Testomat
 hits are always **candidates** (keyword evidence), never "affected". Never blocks:
-a failure here degrades the Impact row only.
+a failure here degrades the Impact row only. See Phase 1c for the separate
+manual-test-candidate query, which reuses these seeds under its own toggle.
+
+### Phase 1c — Manual test recommendation (MCP query, shares Phase 1b's 5–15 s
+window; gated by `toggles.skipManualTestAnalysis`, default `false` = runs)
+Opt-**out**, not opt-in like every other gated phase — the point is a developer
+sees this unless they deliberately turn it off. Needs Phase 1b's
+`impact-index.json` seeds (the script ran for this even if `skipQaImpact` skipped
+the Impact map display). Toggle `true` → `SKIPPED — disabled by config
+(skipManualTestAnalysis)`, always shown, never omitted. Otherwise: same Testomatio
+MCP probe as Phase 1b; absent → `manual-test-candidates.json` with `status:
+"SKIPPED — Testomatio MCP not configured"`. Available → two TQL queries, both
+filtered to `state == 'manual'` (Testomat's own field distinguishing manual from
+automated test records — verified live against the real project): one OR-ing the
+(low-signal-filtered) seed values, one on `jira == '<ticketKey>'` when a ticket key
+exists. Rank seed matches (`matchedBy: "diff-seed"` — the manual test's own text
+mentions the changed code) above ticket-only matches (`matchedBy: "ticket-link"` —
+filed under the same ticket, weaker evidence); cap at 5 shown, `+N more` pointing at
+`manual-test-candidates.json`. Same honesty rules as every other Testomat hit:
+**candidates (keyword/ticket match)**, never "this needs testing" asserted as fact.
+Feeds qa-analyst and the report's own Manual testing section — visible near the
+verdict, not buried in Full Evidence (see Reporting).
 
 ### Phase 2 — Unit level (scripts, 30–90 s; one artifact, four consumers)
 `scripts/run-tests.ps1`: build the affected project graph once (**never the whole
@@ -362,7 +393,7 @@ Run summary right under the header table (which agents were actually called this
 run, a Phase/Actor/Seconds table, total wall-clock — all verbatim from
 `time-ledger.json`, which the orchestrator appends to as each phase completes),
 then the consequence-first verdict block (see Reporting below), capability matrix,
-impact map (concise — see Reporting), per-level detail, Socratic questions,
+impact map + manual testing section (concise — see Reporting), per-level detail, Socratic questions,
 collapsed Full-evidence section (signal
 ledger, weights, methodology, the same phases again with outcome instead of
 actor). Save to
@@ -429,6 +460,13 @@ line — because telling a developer they're *done* is what builds the habit.
   "no signal ≠ not affected". A headline verdict item may cite impact reach only
   when attached to a confirmed finding (e.g. a breaking contract change whose
   endpoint named BA specs exercise).
+- Manual testing section appears whenever Phase 1c ran — independent of the
+  Impact map above, so it can appear even when that section is config-skipped.
+  ≤5 candidates from `manual-test-candidates.json`, `diff-seed` matches ranked
+  above `ticket-link` matches, `+N more` pointing at the artifact. Always
+  *candidates (keyword/ticket match)* — never "you must test this", never
+  "affected". Toggled off or no Testomatio MCP → state that plainly, never omit
+  the section silently.
 - Diff coverage is always "coverage of changed lines, from tests related to this
   branch" — never presented as a global percentage.
 - Never "riskiest tests" — three named lists: *most likely to catch a regression
@@ -441,7 +479,7 @@ line — because telling a developer they're *done* is what builds the habit.
 | Agent | Judgment it owns | Spawns |
 |---|---|---|
 | `qa-intake` | Diff classification, adapter profiles, Jira ACs + Figma links, bootability/outbound/contract probes | every run |
-| `qa-analyst` | Regression risk, AC alignment, Socratic questions, flaky/oasdiff/Pact/impact interpretation — from script JSON only | every run |
+| `qa-analyst` | Regression risk, AC alignment, Socratic questions, flaky/oasdiff/Pact/impact/manual-test-candidate interpretation — from script JSON only | every run |
 | `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile | cache miss |
 | `qa-mutation-author` | The 3–8 business-rule mutants | mutation consented |
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |

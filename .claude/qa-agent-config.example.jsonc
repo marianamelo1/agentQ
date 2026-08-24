@@ -20,6 +20,7 @@
     "executionConsent": "ask",   // ask | always | never
     "deepMutation": false,       // true = unscoped Stryker run (whole changed files)
     "skipQaImpact": false,       // true = skip the impact phase; /qa-impact always runs
+    "skipManualTestAnalysis": false, // true = skip manual-test recommendations. Opt-OUT (default false = runs), unlike skipQaImpact above
     "e2eAuthoring": true,        // background E2E authoring on frontend branches
     "figmaConformance": true,    // compare against Figma frames linked in the ticket
     "reportVerbosity": "full"    // concise | full

@@ -68,20 +68,36 @@ intent, then map onto these four slots:
    reports no diff vs base → tell the user there's nothing to review; stop.
    If no ticket/AC source → ask the user to paste ACs or continue with
    AC-alignment UNVERIFIABLE.
-2b. **Impact (gated by `toggles.skipQaImpact`, never blocking)** — check the toggle
-   first: `true` (the default) → record `SKIPPED — disabled by config
-   (skipQaImpact)` in the time-ledger and skip to step 3 (the report still shows
-   the Impact row with that status). `false` → `scripts/impact-index.ps1 -Manifest
-   <path> -ConfigPath <cfg>` (seeds from the diff set; scans `productRepos` ∪
-   `testRepos` — the UI-automation/BA repo lives in the latter) →
-   `impact-index.json`. Then consult Testomat yourself: probe whether a Testomatio
+2b. **Impact (gated by `toggles.skipQaImpact`, never blocking)** —
+   `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>` runs whenever
+   `skipQaImpact` is `false` OR step 2c's `skipManualTestAnalysis` is `false` (the
+   default) — step 2c needs the same seeds, don't run the script twice. Both
+   toggles `true` → record `SKIPPED — disabled by config (skipQaImpact)` in the
+   time-ledger and skip to step 3 (the report still shows the Impact row with that
+   status). Otherwise the script writes seeds from the diff set (scans
+   `productRepos` ∪ `testRepos` — the UI-automation/BA repo lives in the latter) →
+   `impact-index.json`. If `skipQaImpact` itself is `false`, also consult Testomat
+   for cross-repo candidates: probe whether a Testomatio
    MCP is available in THIS session (pre-declared in `.mcp.json`, but its
    `TESTOMATIO_API_TOKEN` is per-machine — never assume it's working); available →
    search tests/suites by the seeds + ticket
-   component; ALWAYS write `testomat-candidates.json` (status `SKIPPED — Testomatio
+   component; ALWAYS write `testomat-candidates.json` when `skipQaImpact` is false
+   (status `SKIPPED — Testomatio
    MCP not configured` when absent). Stream one line ("Impact: client 4 refs · 3 BA
-   specs · 5 Testomat candidates"). Overlaps step 3; a failure here degrades the
+   specs"). Overlaps step 3; a failure here degrades the
    Impact row only, nothing else.
+2c. **Manual test recommendation (gated by `toggles.skipManualTestAnalysis`,
+   default `false` — opt-**out**, unlike 2b which is opt-in)** — needs step 2b's
+   seeds (`impact-index.json`, which ran above even if `skipQaImpact` skipped the
+   Impact map itself). Toggle `true` → record `SKIPPED — disabled by config
+   (skipManualTestAnalysis)` and skip. Otherwise, same Testomatio MCP probe as 2b;
+   available → two TQL queries, both `state == 'manual'`: one OR-ing the seed
+   values, one on `jira == '<ticketKey>'` if a ticket key exists → write
+   `manual-test-candidates.json`, ranking seed matches (`diff-seed`) above
+   ticket-only matches (`ticket-link`), capped at 5. Absent MCP → the same file
+   with `status: "SKIPPED — Testomatio MCP not configured"`. Stream one line
+   ("Manual testing: 2 candidates — see report"). Overlaps step 3; a failure here
+   degrades this lane only.
 3. **Unit + flaky** — issue `scripts/run-tests.ps1 -Manifest <path>` (chained into
    `scripts/diff-coverage.ps1`) in the SAME tool-call batch as step 4's agent
    dispatch — don't wait for this to finish first. Stream a one-liner once it lands
@@ -103,7 +119,9 @@ intent, then map onto these four slots:
      step 2 should have carried the evidence forward instead.
    - If step 2b ran, point `qa-analyst` at `impact-index.json` +
      `testomat-candidates.json` too — cross-repo fan-in is part of its
-     regression-risk brief.
+     regression-risk brief. If step 2c ran, also point it at
+     `manual-test-candidates.json` — manual-test interpretation is part of the same
+     brief.
 5. **💬 Mutation consent** (per `toggles.mutationConsent`) — but first apply your
    own judgment, before even checking the toggle: if the diff has nothing worth
    mutating (pure literal/label/copy/config changes, no branches or business

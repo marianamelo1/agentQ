@@ -56,8 +56,9 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
 
 ## Capability matrix
 
-<!-- One row per level. State is exactly one of:
-     RAN | DEGRADED — <why> | SKIPPED — <why> | PENDING — <why>.
+<!-- One row per level, PLUS one Impact row (always present — never omitted even
+     when config-skipped, see CLAUDE.md Preconditions #6/#7). State is exactly one
+     of: RAN | DEGRADED — <why> | SKIPPED — <why> | PENDING — <why>.
      PENDING is only for E2E authoring still running in background:
      "PENDING — authoring in background; next run includes it". -->
 
@@ -69,6 +70,31 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
 | API + Contract | {{state}} | {{one-line result; contract phrasing per rules below}} |
 | E2E | {{state \| PENDING — authoring in background; next run includes it}} | {{one-line result}} |
 | Design conformance | {{state}} | {{one-line result or "SKIPPED — no design linked in ticket"}} |
+| Impact | {{state, e.g. "SKIPPED — disabled by config"}} | {{one-line result, e.g. "4 refs across 2 repos; see Impact map"}} |
+
+## Impact map
+
+<!-- Only when the Impact phase ran (toggles.skipQaImpact: false) — config-skipped
+     omits this whole section (the matrix row above already says why). One concise
+     block, hard caps: ≤3 evidence items per lane (same repo / other repos /
+     UI-automation / Testomat / Pact consumers), "+N more" pointing at
+     impact-index.json — never inline the full match list. UI-automation and
+     Testomat hits are always *candidates (keyword match)*, never "affected" or
+     failures. Always closes with "no signal ≠ not affected". -->
+
+{{impact map findings, or omit this whole section when config-skipped}}
+
+## Manual testing
+
+<!-- Only when Phase 1c ran (toggles.skipManualTestAnalysis: false, the default) —
+     independent of the Impact map above: this can appear even when that section
+     is omitted, and vice versa. From manual-test-candidates.json: ≤5 candidates,
+     diff-seed matches ranked above ticket-link matches, "+N more" pointing at the
+     artifact. Always *candidates (keyword/ticket match)* — never "you must test
+     this", never asserted as affected. Toggled off or no Testomatio MCP → state
+     that plainly ("SKIPPED — <why>"), never omit the section silently. -->
+
+{{manual test candidates, or "SKIPPED — <why>"}}
 
 ## Unit level
 

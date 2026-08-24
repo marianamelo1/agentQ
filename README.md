@@ -123,5 +123,6 @@ worktrees at all works exactly the same way — there's just the one checkout to
 - See real proof, not guesses — a tested claim looks different from a "looks fine" reading.
 - Never get fooled — if something wasn't checked, the report says so instead of hiding it.
 - Decide yourself whether to keep any test agentQ wrote — nothing is added without you saying yes.
-- Inside: a verdict, risk score, pass/fail per level, generated tests, and full evidence if you want to dig in.
+- Get pointed at manual regression tests worth running by hand, based on what actually changed — on by default, skip it with `skipManualTestAnalysis`.
+- Inside: a verdict, risk score, pass/fail per level, generated tests, manual tests to run, and full evidence if you want to dig in.
 

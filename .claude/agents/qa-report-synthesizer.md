@@ -51,7 +51,14 @@ a number that isn't there.
    pointing at `impact-index.json` — never inline the full match list. UI-automation
    and Testomat hits are always *candidates (keyword match)*, never "affected" or
    failures. The block always closes with "no signal ≠ not affected".
-5. **Per-level detail** — findings from the analyst brief using its exact
+5. **Manual testing** — only when Phase 1c ran; independent of the Impact map
+   above, so this can appear even when that section is config-skipped (and vice
+   versa). From `manual-test-candidates.json` + the analyst's brief: ≤5
+   candidates, `diff-seed` matches ranked above `ticket-link` matches, `+N more`
+   pointing at the artifact. Always *candidates (keyword/ticket match)* — never
+   "you must test this". Toggled off or no Testomatio MCP → state the
+   SKIPPED/DEGRADED reason plainly, never omit the section silently.
+6. **Per-level detail** — findings from the analyst brief using its exact
    evidence-qualified vocabulary (AC claims, scenario states, gap lattice tiers,
    contract phrasing, the three test lists). Whichever of Unit/Mutation/Component/
    API sections has a matching generated scenario (or, for Mutation, a survivor
@@ -66,8 +73,8 @@ a number that isn't there.
    <reason> — run: <command>`) / Vacuity grade (`verified against base` /
    `static only`) / Keep-candidate?, sorted Unit → Mutation → Component → API →
    E2E to match the section order above.
-6. **Socratic questions** — the analyst's list, verbatim.
-7. **Full evidence** (collapsed `<details>`) — risk-score signal ledger with weights
+7. **Socratic questions** — the analyst's list, verbatim.
+8. **Full evidence** (collapsed `<details>`) — risk-score signal ledger with weights
    and contributions, renormalization note, methodology one-liner ("heuristic scored
    from this diff only; not calibrated against CI history"), the time ledger, capture
    provenance (contract lane), command log paths.

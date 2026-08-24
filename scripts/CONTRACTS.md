@@ -334,3 +334,35 @@ file on a run where the impact phase RAN (per the time-ledger) means the
 orchestrator skipped a step — treat as `DEGRADED — artifact missing`; on a
 config-skipped run the row reads `SKIPPED — disabled by config`. Either way, never
 silently omit the row.
+
+## manual-test-candidates.json  (orchestrator, Phase 1c — session-dependent, ALWAYS written unless config-skipped)
+Written by the orchestrator, same Testomatio MCP probe as `testomat-candidates.json`
+above, but gated by its own toggle (`toggles.skipManualTestAnalysis`, default
+`false`) — **opt-out, not opt-in**, unlike the Impact phase. Runs independently of
+`skipQaImpact`: it only needs `impact-index.json`'s seeds, which `impact-index.ps1`
+writes whenever either toggle needs them (see that section). Queries Testomat for
+`state == 'manual'` tests only — this is what distinguishes it from
+`testomat-candidates.json`, which searches all tests regardless of automation state.
+```json
+{
+  "status": "RAN",   // "RAN" | "SKIPPED — Testomatio MCP not configured" | "SKIPPED — disabled by config (skipManualTestAnalysis)" | "DEGRADED — <query error>"
+  "queriedBy": { "seeds": ["POST /api/entries"], "ticket": "EC-1234" },
+  "candidates": [
+    { "id": "de8c0276", "title": "Disconnect the employee after connecting an existing registration user",
+      "suite": "Connect to existing Registration App User", "matchedBy": "diff-seed",
+      "matchedSeed": "POST /api/entries", "url": "<testomat test url>" },
+    { "id": "194c8320", "title": "Create employee group and verify it appears in the list",
+      "suite": "Employee Group List", "matchedBy": "ticket-link", "url": "<testomat test url>" }
+  ]
+}
+```
+`matchedBy`: `diff-seed` (the manual test's own text matched a seed extracted from
+the diff — the stronger signal) or `ticket-link` (matched only via `jira ==
+'<ticketKey>'` — filed under the same ticket, weaker evidence since it doesn't
+confirm the test text actually relates to the changed code). Rank `diff-seed`
+candidates above `ticket-link` ones. Consumers present these ONLY as *candidates
+(keyword/ticket match)* — never "this must be tested", never "affected". Cap at 5
+shown in the report, `+N more` pointing at this file. A missing file on a run where
+Phase 1c RAN is `DEGRADED — artifact missing`; toggle-skipped or no MCP → the
+`status` field carries the honest reason — never silently omit the report's Manual
+testing section, state the SKIPPED/DEGRADED reason instead.
