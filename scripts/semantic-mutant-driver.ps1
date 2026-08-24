@@ -187,7 +187,13 @@ $buildFailed = @{}
 
 foreach ($proj in $distinctProjects) {
     Write-Verbose "Building $proj"
-    $res = Invoke-Dotnet -ArgumentList @('build', $proj, '-c', 'Debug', '--no-restore') -WorkingDirectory $worktreeDir
+    # WHY allow restore on the FIRST build: worktree.ps1 -Ensure creates a fresh
+    # checkout that has never been restored, so its test projects have no
+    # obj/project.assets.json. A --no-restore build there fails with NETSDK1004,
+    # which this driver would otherwise misreport as "injected mutant code does not
+    # compile" (a false CompileError). Build once WITH restore so the worktree
+    # self-heals; the per-mutant test runs below still use --no-build.
+    $res = Invoke-Dotnet -ArgumentList @('build', $proj, '-c', 'Debug') -WorkingDirectory $worktreeDir
     $logName = 'build-' + ([System.IO.Path]::GetFileNameWithoutExtension($proj) -replace '[^\w\-\.]', '_') + '.log'
     Write-Utf8NoBom -Path (Join-Path $evidenceDir $logName) -Content $res.Output
     if ($res.ExitCode -ne 0) { $buildFailed[$proj] = $res.ExitCode }

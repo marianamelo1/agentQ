@@ -70,7 +70,17 @@ $ProgressPreference = 'SilentlyContinue'
 $script:OasdiffVersion = '1.29.1'
 $script:RepoRoot       = Split-Path -Parent $PSScriptRoot
 $script:ToolsDir       = Join-Path $script:RepoRoot 'tools'
-$script:OasdiffExe     = Join-Path $script:ToolsDir 'oasdiff.exe'
+# WHY platform detection: oasdiff ships per-OS/arch release assets and the binary
+# is oasdiff.exe on Windows, oasdiff elsewhere. agentQ runs on macOS/Linux too, so
+# a hardcoded windows_amd64 / .exe / tar.exe path failed the whole contract lane.
+# $IsWindows/$IsMacOS/$IsLinux are automatic vars on PowerShell 6+ (this repo runs pwsh 7).
+$script:IsWin          = [bool](Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)
+if (-not (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue)) { $script:IsWin = $true }  # Windows PowerShell 5.1
+$script:OasdiffOs      = if ($script:IsWin) { 'windows' } elseif ($IsMacOS) { 'darwin' } else { 'linux' }
+# oasdiff ships a single universal macOS asset named darwin_all; windows/linux are per-arch.
+$script:OasdiffArch    = if ($script:OasdiffOs -eq 'darwin') { 'all' } elseif ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) { 'arm64' } else { 'amd64' }
+$script:OasdiffBinName = if ($script:IsWin) { 'oasdiff.exe' } else { 'oasdiff' }
+$script:OasdiffExe     = Join-Path $script:ToolsDir $script:OasdiffBinName
 $script:TempDir        = $null   # set after the manifest is read (lives under workspaceDir)
 
 # ---------------------------------------------------------------------------
@@ -182,7 +192,7 @@ function Install-Oasdiff {
     [System.Net.ServicePointManager]::SecurityProtocol = `
         [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
-    $asset     = "oasdiff_$($script:OasdiffVersion)_windows_amd64.tar.gz"
+    $asset     = "oasdiff_$($script:OasdiffVersion)_$($script:OasdiffOs)_$($script:OasdiffArch).tar.gz"
     $baseUrl   = "https://github.com/oasdiff/oasdiff/releases/download/v$($script:OasdiffVersion)"
     $archive   = Join-Path $script:ToolsDir $asset
     $checksums = Join-Path $script:ToolsDir 'oasdiff-checksums.txt'
@@ -210,16 +220,18 @@ function Install-Oasdiff {
     }
 
     # Extract into a scratch dir and move only the exe, keeping tools/ tidy.
-    # tar.exe ships with Windows 10+ and handles .tar.gz natively.
+    # `tar` handles .tar.gz natively on every target OS (tar.exe on Windows 10+,
+    # /usr/bin/tar on macOS/Linux) -- invoke it by the bare name, not tar.exe.
     $extractDir = Join-Path $script:ToolsDir 'oasdiff-extract'
     if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -Confirm:$false }
     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-    & tar.exe -xzf $archive -C $extractDir
-    if ($LASTEXITCODE -ne 0) { throw "tar.exe failed (exit $LASTEXITCODE) extracting $asset" }
+    & tar -xzf $archive -C $extractDir
+    if ($LASTEXITCODE -ne 0) { throw "tar failed (exit $LASTEXITCODE) extracting $asset" }
 
-    $exe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter 'oasdiff.exe' | Select-Object -First 1
-    if ($null -eq $exe) { throw "oasdiff.exe not found inside $asset" }
+    $exe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter $script:OasdiffBinName | Select-Object -First 1
+    if ($null -eq $exe) { throw "$($script:OasdiffBinName) not found inside $asset" }
     Move-Item -LiteralPath $exe.FullName -Destination $script:OasdiffExe -Force
+    if (-not $script:IsWin) { & chmod '+x' $script:OasdiffExe }
 
     Remove-Item -LiteralPath $archive, $checksums -Force -Confirm:$false
     Remove-Item -LiteralPath $extractDir -Recurse -Force -Confirm:$false

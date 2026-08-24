@@ -200,6 +200,13 @@ function Read-TrxResult {
             $null = $result.Failures.Add([ordered]@{ fqn = $name; message = $msg; stack = $stack })
         }
     }
+    # WHY .ToArray() before return: on PowerShell 7.5.x the array-subexpression
+    # operator @( ) throws "Argument types do not match" when applied to a
+    # System.Collections.Generic.List[object] (verified live, 7.5.4) -- and every
+    # consumer wraps these two with @(...). Hand back plain object[] so callers'
+    # @($trx.Failures)/@($trx.PerTestDurations) round-trip cleanly.
+    $result.Failures = $result.Failures.ToArray()
+    $result.PerTestDurations = $result.PerTestDurations.ToArray()
     return $result
 }
 
@@ -261,6 +268,25 @@ function Get-AffectedTestClasses {
         $null = $classes.Add("${base}Tests")
         $null = $classes.Add("${base}Test")
     }
+
+    # A changed file inside the TEST project's OWN directory is itself an affected
+    # test: its class name IS the filename. Without this, a developer's brand-new
+    # test whose name doesn't derive from a changed SUT file (e.g. a SUT
+    # DraftEntriesController.cs change but tests named
+    # DraftEntriesControllerSingleVoucherTests / ...AuditScopeTests) never runs --
+    # exactly the tests written for this change. Add them by filename directly.
+    $testProjDir = (([string](Get-Prop $Profile 'projectPath' '')) -replace '\\', '/') -replace '/[^/]+\.csproj$', ''
+    $testProjDir = $testProjDir.ToLowerInvariant()
+    if ($testProjDir) {
+        foreach ($f in @(Get-Prop $DiffSet 'files' @())) {
+            $path = ([string](Get-Prop $f 'path' '')) -replace '\\', '/'
+            if ($path -notmatch '\.cs$') { continue }
+            if (-not $path.ToLowerInvariant().StartsWith("$testProjDir/")) { continue }
+            $base = [System.IO.Path]::GetFileNameWithoutExtension($path)
+            if (-not [string]::IsNullOrWhiteSpace($base)) { $null = $classes.Add($base) }
+        }
+    }
+
     return @($classes | Select-Object -Unique)
 }
 
@@ -281,12 +307,21 @@ function Invoke-CoverageWrappedTest {
     )
     $result = [ordered]@{ ExitCode = -1; CoverageDegraded = $false; TimedOut = $false; CoverageXml = $null }
 
+    # For the collector mechanism the process runs in the product repo ($WorkDir);
+    # for dotnet-coverage it runs where the local-tool manifest lives (agentQ repo
+    # root) so `dotnet dotnet-coverage` resolves the local tool -- the wrapped inner
+    # `dotnet test` uses absolute project paths, so its cwd is immaterial.
+    $coverageCwd = $WorkDir
     if ($Mechanism -eq 'dotnet-coverage') {
         # WHY the inner command is a single quoted string: dotnet-coverage collect
         # <cmd> <args> takes the wrapped invocation as one process specification.
         $inner = 'dotnet test ' + (($DotnetArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
-        $args = @('collect', '-f', 'cobertura', '-o', $CoverageOutXml, $inner)
-        $exe = 'dotnet-coverage'
+        # WHY `dotnet dotnet-coverage` (not the bare exe): dotnet-coverage is installed
+        # as a LOCAL tool in the agentQ manifest, never globally / never on PATH, so it
+        # is invoked through the dotnet host and resolved from the manifest directory.
+        $args = @('dotnet-coverage', 'collect', '-f', 'cobertura', '-o', $CoverageOutXml, $inner)
+        $exe = 'dotnet'
+        $coverageCwd = Split-Path -Parent $PSScriptRoot
     }
     else {
         $args = @('test') + $DotnetArgs + @('--collect:XPlat Code Coverage;Format=cobertura;SingleHit=true')
@@ -296,9 +331,19 @@ function Invoke-CoverageWrappedTest {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe
     foreach ($a in $args) { $null = $psi.ArgumentList.Add($a) }
-    $psi.WorkingDirectory = $WorkDir
+    $psi.WorkingDirectory = $coverageCwd
     $psi.UseShellExecute = $false
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    # WHY try/catch on Start: a missing coverage executable (e.g. the optional
+    # dotnet-coverage tool not installed on this machine) throws Win32Exception here.
+    # That must degrade the coverage lane -- the caller re-runs plainly on
+    # CoverageDegraded -- never crash the whole unit run.
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    }
+    catch {
+        $result.CoverageDegraded = $true
+        return $result
+    }
     $finished = $proc.WaitForExit($TimeoutSeconds * 1000)
 
     if (-not $finished) {
@@ -625,15 +670,27 @@ try {
     if ($GeneratedOnly -or $FlakyRepeats -le 0) {
         $flaky.skippedReason = if ($GeneratedOnly) { 'not applicable in -GeneratedOnly mode' } else { 'disabled (-FlakyRepeats 0)' }
     }
-    elseif ($firstPassSeconds -gt 30.0) {
-        $flaky.skippedReason = "affected subset took ${firstPassSeconds}s on the first pass (>30s threshold)"
+    elseif ($plainRunSecondsTotal -gt 30.0) {
+        # WHY the subset TOTAL (not just the first project): CLAUDE.md's rule is
+        # "flaky repeats auto-skip when the subset itself was slow (>30s)". A fast
+        # first project (e.g. 3s) followed by a multi-minute project (ContainerIntegrity)
+        # must still skip -- otherwise the repeats re-run the whole slow subset 2x.
+        $flaky.skippedReason = "affected subset took $([math]::Round($plainRunSecondsTotal,1))s across all projects (>30s threshold)"
     }
     else {
+        # WHY member access (not Get-Prop) + explicit foreach: these run records hold
+        # in-memory [ordered] dicts whose keys Get-Prop's PSObject.Properties lookup
+        # does NOT see (verified: returns the default), which silently emptied the
+        # baseline. And `.failures.fqn` on an EMPTY failures array throws under
+        # StrictMode ("property 'fqn' cannot be found") -- the healthy zero-failure
+        # case -- so collect fqns by iterating, never by member-access on the array.
         $baselineOutcomes = @{}
         foreach ($r in $runs) {
-            foreach ($ptd in @(Get-Prop $r 'perTestDurations' @())) {
-                $fqn = [string](Get-Prop $ptd 'fqn' '')
-                if ($fqn) { $baselineOutcomes[$fqn] = ($r.failures.fqn -notcontains $fqn) }
+            $rFailedFqns = @()
+            foreach ($f in @($r.failures)) { $rFailedFqns += [string]$f.fqn }
+            foreach ($ptd in @($r.perTestDurations)) {
+                $fqn = [string]$ptd.fqn
+                if ($fqn) { $baselineOutcomes[$fqn] = (-not ($rFailedFqns -contains $fqn)) }
             }
         }
         $flippedSet = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -654,9 +711,12 @@ try {
                     '--', "RunConfiguration.MaxCpuCount=$cores", 'RunConfiguration.TreatNoTestsAsError=true')
                 & dotnet test @repeatArgs | Out-Null   # WHY not 2>&1: same crash as above
                 $trxRepeat = Read-TrxResult -TrxPath $trxPathRepeat
-                foreach ($ptd in $trxRepeat.PerTestDurations) {
-                    $fqn = [string](Get-Prop $ptd 'fqn' '')
-                    $passedNow = ($trxRepeat.Failures.fqn -notcontains $fqn)
+                $repeatFailedFqns = @()
+                foreach ($f in @($trxRepeat.Failures)) { $repeatFailedFqns += [string]$f.fqn }
+                foreach ($ptd in @($trxRepeat.PerTestDurations)) {
+                    $fqn = [string]$ptd.fqn
+                    if (-not $fqn) { continue }
+                    $passedNow = (-not ($repeatFailedFqns -contains $fqn))
                     if ($baselineOutcomes.ContainsKey($fqn) -and $baselineOutcomes[$fqn] -ne $passedNow) {
                         $null = $flippedSet.Add($fqn)
                     }
@@ -678,12 +738,16 @@ try {
         Write-JsonFileNoBom -Object $calibHash -Path $calibPath
     }
 
+    # WHY member access (not Get-Prop): $runs holds in-memory [ordered] dicts whose
+    # keys Get-Prop's PSObject.Properties lookup does not see -- Get-Prop here made
+    # the summary read "0/0 passed" for a fully-green run. These keys are always set
+    # on the run records, so direct access is StrictMode-safe.
     $totalExecuted = 0; $totalPassed = 0; $totalFailed = 0; $anyZeroMatch = $false
     foreach ($r in $runs) {
-        $totalExecuted += [int](Get-Prop $r 'testsExecuted' 0)
-        $totalPassed += [int](Get-Prop $r 'passed' 0)
-        $totalFailed += [int](Get-Prop $r 'failed' 0)
-        if ([bool](Get-Prop $r 'zeroMatchError' $false)) { $anyZeroMatch = $true }
+        $totalExecuted += [int]$r.testsExecuted
+        $totalPassed += [int]$r.passed
+        $totalFailed += [int]$r.failed
+        if ([bool]$r.zeroMatchError) { $anyZeroMatch = $true }
     }
     $mode = if ($GeneratedOnly) { 'generated' } else { 'affected' }
     Write-Output ("run-tests ({0}): {1} project run(s)  -  {2}/{3} passed{4}" -f $mode, $runs.Count, $totalPassed, $totalExecuted, $(if ($anyZeroMatch) { '  -  WARNING: at least one zero-match filter' } else { '' }))

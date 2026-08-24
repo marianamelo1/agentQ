@@ -608,12 +608,22 @@ try {
     # ---------------- step 1: pinned local tool, WORKTREE only ----------------
     if ($plannedRuns.Count -gt 0) {
         $toolLogBase = Join-Path $logsDir 'tool'
-        $toolsManifestPath = Join-Path $worktreeDir '.config\dotnet-tools.json'
+        # WHY check BOTH locations: dotnet accepts a tool manifest at EITHER
+        # .config/dotnet-tools.json OR a repo-root dotnet-tools.json. e-conomic
+        # commits the ROOT form (pinning dotnet-ef). Looking only under .config
+        # missed it, so `dotnet new tool-manifest` then collided with the existing
+        # root manifest (exit 73, "Overwrite ./dotnet-tools.json") and aborted the
+        # whole mechanical tier. Detect either; install into whichever exists.
+        $manifestCandidates = @(
+            (Join-Path $worktreeDir '.config\dotnet-tools.json'),
+            (Join-Path $worktreeDir 'dotnet-tools.json')
+        )
+        $existingManifest = $manifestCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
         $hasStryker = $false
-        if (Test-Path -LiteralPath $toolsManifestPath) {
-            $tm = Read-JsonFile -Path $toolsManifestPath
+        if ($existingManifest) {
+            $tm = Read-JsonFile -Path $existingManifest
             $tools = Get-Prop $tm 'tools'
-            # If the repo pins its own dotnet-stryker version we respect that pin  - 
+            # If the repo pins its own dotnet-stryker version we respect that pin  -
             # reproducibility of the repo's own setup beats our preferred version.
             if ($null -ne $tools -and $null -ne (Get-Prop $tools 'dotnet-stryker')) { $hasStryker = $true }
         }
