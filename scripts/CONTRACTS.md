@@ -65,6 +65,42 @@ explicitly (see `SKILL.md` Inputs):
 }
 ```
 
+## jira-ticket.json  (scripts/jira.ps1 — invoked by qa-intake; direct REST, no MCP)
+Written by `scripts/jira.ps1 -IssueIdOrKey <key-or-url> -OutPath <file>` — a direct
+`GET {hub}/get_issue?issueIdOrKey=` against the Visma integration-hub Jira gateway,
+authenticated with `JIRA_PERSONAL_ACCESS_TOKEN` (OS env var, set by
+`scripts/setup-mcp.ps1` — never assumed present). `JIRA_INTEGRATION_HUB_URL`
+optionally overrides the generic prod gateway defaulted in the script. Read-only:
+`get_issue` is the only Jira operation agentQ performs. ALWAYS written when the run
+has a ticket key — `status` carries the honesty when the fetch couldn't happen. The
+script's one stdout line is compact JSON (`{status, issueKey, artifact}`).
+```json
+{
+  "status": "OK",   // "OK" | "SKIPPED — Jira not configured (JIRA_PERSONAL_ACCESS_TOKEN not set; run scripts/setup-mcp.ps1)" | "DEGRADED — <humanized HTTP/timeout error>"
+  "issueKey": "EC-1234",
+  "browseUrl": "https://jira.visma.com/browse/EC-1234",
+  "summary": "…",
+  "descriptionWikiMarkup": "…",
+  "issueType": "Story",
+  "issueStatus": "In Progress",
+  "labels": [],
+  "parentKey": "EC-1200",     // fields.parent (sub-task parent); null when absent
+  "epicKey": "EC-1100",       // customfield_13061 (epic link); null when absent
+  "figmaLinks": [],           // mechanical regex pre-scan over summary/description/comments
+  "comments": [{ "author": "…", "created": "…", "bodyWikiMarkup": "…" }],   // last 10
+  "fetchedAt": "2026-08-24T09:00:00Z"
+}
+```
+`descriptionWikiMarkup`/`bodyWikiMarkup` are **Jira wiki markup, not Markdown**
+(`h2.`, `*bold*`, `{{code}}`, `# ` ordered lists) — never parse or render them as
+Markdown. AC extraction is qa-intake's judgment, deliberately NOT in this file.
+When the ticket itself has no AC-relevant info and `parentKey`/`epicKey` is set,
+qa-intake fetches that key into `jira-ticket-parent.json` (same shape) and labels
+the AC source in its brief ("ACs from parent EC-1200"). DEGRADED/SKIPPED status →
+the orchestrator asks for pasted AC text; a missing file on a run that had a ticket
+key means the fetch step was skipped — treat as `DEGRADED — artifact missing`,
+never as a pass.
+
 ## diff-set.json  (worktree.ps1 -DiffSet)
 ```json
 {
