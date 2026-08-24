@@ -22,41 +22,20 @@ The full workflow, safety rules, and phase-by-phase detail live in
      (point `productRepos` at your real local checkouts)
    - `.env.example` → `.env` (only needed for the E2E and Pact lanes; missing
      values degrade those lanes honestly, they never block the review)
-3. Configure the MCPs — run `.\scripts\setup-mcp.ps1` once in your own
-   PowerShell terminal, then restart Claude Code and approve the MCP prompt
-   (see **MCP setup** below).
-4. Check out the branch under review in the product repo.
-5. For E2E tests (frontend branches only), have your local dev stack already
+3. Run `.\scripts\setup-mcp.ps1` once in your own PowerShell terminal 
+4. Restart Claude Code 
+5. Run `claude` and approve the MCP prompt
+5. Check out the branch under review in the product repo.
+6. For E2E tests (frontend branches only), have your local dev stack already
    running. Other levels don't need this.
-6. Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
+7. Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
    or just **"Test my branch EC-8876"** — the repo name is optional; agentQ finds it
    by checking which registered repo has a matching branch checked out.
 
-## MCP setup
-
-1. Run `.\scripts\setup-mcp.ps1` in your own PowerShell terminal (not through
-   Claude Code — it prompts interactively). It does the whole thing: clones and
-   `npm install`s `mcp-visma-jira`, opens the token pages in your browser and
-   asks only for the two tokens (Testomat optional), and offers to connect the
-   **Figma** claude.ai connector — a browser login with your Visma account.
-   Values are persisted as User environment variables, never into any file,
-   and it ends with a status check.
-2. Restart Claude Code — env vars only apply to new sessions — and approve
-   the MCP prompt (`⏸ Pending approval` in the status check is expected until
-   then). Verify with `/mcp`.
-
-Check status any time with `.\scripts\check-mcp.ps1` — statuses and scope of
-just this project's servers, plus whether the env vars are set (never their
-values).
+## Issue on setup
 
 Entered a wrong value? `.\scripts\setup-mcp.ps1 -Reset <VAR_NAME>`, then
-re-run without `-Reset` to set it again.
-
-Jira behaving oddly? Two known traps: a server added with `claude mcp add` at
-user scope silently shadows `.mcp.json` — `claude mcp get jira` must say
-*Project config (shared via .mcp.json)*, otherwise `claude mcp remove jira -s
-user`. And since the setup script skips vars that are already set, stale values
-survive re-runs — fix them with `-Reset` as above.
+re-run without `-Reset` to set it again. 
 
 ## Command-line style invocation
 
@@ -96,11 +75,30 @@ every match (repo, branch, path) and asks which one you mean. Add `--repo` or
 `--branch` if you already know which one and want to skip the question. Not using
 worktrees at all works exactly the same way — there's just the one checkout to find.
 
+## Get QA Impact on you code
+
+"What could my change affect?" — without running a review. `/qa-impact` scans
+what references the code your branch touches (or a named target, before any
+code exists) across four lanes: same-repo features, other registered repos,
+UI-automation (BA) specs, and Testomat tests.
+
+Run:
+
+```
+/qa-impact                                    blast radius of the current branch diff
+/qa-impact EC-8876                            same, finding the branch by ticket
+/qa-impact --target /api/v2/entries           a named endpoint, table, or symbol — no code needed
+what's affected if I change the entries endpoint?
+```
+
+Same flags as `/qa-review` (`--branch`, `--repo`, `--worktree`, `--ticket`),
+plus `--target`. 
+
 ## What runs where
 
 - **Agents judge, scripts execute.** Six subagents in `.claude/agents/` do only
   judgment work (classification, analysis, test authoring, mutation design,
-  design conformance, report synthesis). Nine deterministic PowerShell scripts
+  design conformance, report synthesis). Eleven deterministic PowerShell scripts
   in `scripts/` do everything mechanical — so the same branch produces the same
   verdict twice.
 - Everything lands in this repo: intermediate JSON under

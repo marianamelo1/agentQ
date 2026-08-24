@@ -63,10 +63,17 @@ intent, then map onto these four slots:
    SDK/node/docker. First run on a repo → offer the one-time setup (Stryker tool
    restore, oasdiff download) as a consented step; declining just narrows lanes.
 2. **Intake** — delegate to `qa-intake` with the manifest path. It writes
-   `diff-set.json` + `adapter-profiles.json` and returns the brief (levels armed,
-   ACs, Figma links, bootability, outbound destinations, contract gate). If it
-   reports no diff vs base → tell the user there's nothing to review; stop.
-   If no ticket/AC source → ask the user to paste ACs or continue with
+   `diff-set.json` + `adapter-profiles.json` + `jira-ticket.json` (the last via
+   `scripts/jira.ps1` — direct REST, no Jira MCP; ALWAYS written when a ticket
+   key exists, with an honest `SKIPPED — Jira not configured…` / `DEGRADED — …`
+   status when the token is missing or the call fails — never assume the token
+   exists on this machine. When the ticket itself has no AC-relevant info it
+   follows `parentKey`/`epicKey` into `jira-ticket-parent.json` and labels the
+   AC source) and returns the brief (levels armed, ACs + Jira status, Figma
+   links, bootability, outbound destinations, contract gate). If it reports no
+   diff vs base → tell the user there's nothing to review; stop.
+   If no ticket/AC source (or the Jira lane is SKIPPED/DEGRADED with nothing
+   pasted) → ask the user to paste ACs or continue with
    AC-alignment UNVERIFIABLE.
 2b. **Impact (gated by `toggles.skipQaImpact`, never blocking)** —
    `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>` runs whenever

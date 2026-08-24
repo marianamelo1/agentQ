@@ -1,11 +1,13 @@
 #Requires -Version 5.1
 <#
-check-mcp.ps1  -  read-only status check of the MCP servers THIS project needs.
+check-mcp.ps1  -  read-only status check of everything THIS project depends on:
+prerequisite tools, the MCP servers declared in .mcp.json, the env vars, the
+Figma connector, and a LIVE Jira connectivity probe (scripts/jira.ps1 -Probe -
+Jira is a direct REST lane, not an MCP).
 
 `/mcp` and `claude mcp list` count every server across every scope (including
-claude.ai connectors). This shows only the servers declared in .mcp.json, plus
-whether the env vars they substitute are set. Changes nothing; safe to run in
-your own terminal or through Claude Code.
+claude.ai connectors); this shows only what agentQ actually uses. Changes
+nothing; safe to run in your own terminal or through Claude Code.
 
 Usage:
   .\scripts\check-mcp.ps1
@@ -22,6 +24,27 @@ if (-not $claude) {
     else { throw "claude CLI not found on PATH or at $fallback" }
 }
 
+# --- prerequisite tools -----------------------------------------------------------
+
+$tools = @(
+    @{ Command = 'git';    Optional = $false },
+    @{ Command = 'node';   Optional = $false },
+    @{ Command = 'npm';    Optional = $false },
+    @{ Command = 'dotnet'; Optional = $false },
+    @{ Command = 'docker'; Optional = $true }
+)
+foreach ($t in $tools) {
+    if (Get-Command $t.Command -ErrorAction SilentlyContinue) {
+        Write-Host ("[ok] {0}" -f $t.Command) -ForegroundColor Green
+    } else {
+        $suffix = if ($t.Optional) { ' (optional - consented Testcontainers paths only)' } else { ' - run .\scripts\setup-mcp.ps1' }
+        Write-Host ("[missing] {0}{1}" -f $t.Command, $suffix) -ForegroundColor $(if ($t.Optional) { 'Yellow' } else { 'Red' })
+    }
+}
+
+# --- MCP servers declared in .mcp.json ---------------------------------------------
+
+Write-Host ""
 $mcpJson = Join-Path (Split-Path $PSScriptRoot -Parent) '.mcp.json'
 $servers = (Get-Content $mcpJson -Raw | ConvertFrom-Json).mcpServers.PSObject.Properties.Name
 
@@ -35,25 +58,40 @@ foreach ($name in $servers) {
     }
 }
 
+# --- env vars (never their values) --------------------------------------------------
+
 Write-Host ""
 $vars = @(
-    @{ Name = 'MCP_VISMA_JIRA_PATH';        Optional = $false },
-    @{ Name = 'JIRA_INTEGRATION_HUB_URL';   Optional = $false },
-    @{ Name = 'JIRA_PERSONAL_ACCESS_TOKEN'; Optional = $false },
-    @{ Name = 'TESTOMATIO_API_TOKEN';       Optional = $true }
+    @{ Name = 'JIRA_PERSONAL_ACCESS_TOKEN'; Optional = $false; Suffix = ' (Jira REST lane - scripts/jira.ps1, not an MCP)' },
+    @{ Name = 'TESTOMATIO_API_TOKEN';       Optional = $true;  Suffix = ' (optional - impact/Testomat lane only)' }
 )
 foreach ($v in $vars) {
-    $suffix = if ($v.Optional) { ' (optional - impact/Testomat lane only)' } else { '' }
     $user = [Environment]::GetEnvironmentVariable($v.Name, 'User')
     if (-not $user) {
         $color = if ($v.Optional) { 'Yellow' } else { 'Red' }
-        Write-Host "[missing] $($v.Name)$suffix - run .\scripts\setup-mcp.ps1" -ForegroundColor $color
+        Write-Host "[missing] $($v.Name)$($v.Suffix) - run .\scripts\setup-mcp.ps1" -ForegroundColor $color
     } elseif (-not [Environment]::GetEnvironmentVariable($v.Name, 'Process')) {
-        Write-Host "[set] $($v.Name)$suffix - but not in this session; restart Claude Code / this terminal" -ForegroundColor Yellow
+        Write-Host "[set] $($v.Name)$($v.Suffix) - but not in this session; restart Claude Code / this terminal" -ForegroundColor Yellow
     } else {
-        Write-Host "[set] $($v.Name)$suffix" -ForegroundColor Green
+        Write-Host "[set] $($v.Name)$($v.Suffix)" -ForegroundColor Green
     }
 }
+if ([Environment]::GetEnvironmentVariable('JIRA_INTEGRATION_HUB_URL', 'User')) {
+    Write-Host "[set] JIRA_INTEGRATION_HUB_URL (optional override - jira.ps1 defaults to the generic prod gateway)" -ForegroundColor Green
+}
+if ([Environment]::GetEnvironmentVariable('MCP_VISMA_JIRA_PATH', 'User')) {
+    Write-Host "[obsolete] MCP_VISMA_JIRA_PATH - the Jira MCP is retired; clear with: .\scripts\setup-mcp.ps1 -Reset MCP_VISMA_JIRA_PATH" -ForegroundColor Yellow
+}
+
+# --- live Jira probe (REST lane, not an MCP) -----------------------------------------
+
+Write-Host ""
+$probeRaw = & (Join-Path $PSScriptRoot 'jira.ps1') -Probe
+$probeStatus = try { ($probeRaw | ConvertFrom-Json).status } catch { "DEGRADED - unreadable probe output: $probeRaw" }
+$probeColor = if ($probeStatus -like 'OK*') { 'Green' } elseif ($probeStatus -like 'SKIPPED*') { 'Yellow' } else { 'Red' }
+Write-Host ("{0,-12} {1,-45} {2}" -f 'jira', $probeStatus, 'REST (scripts/jira.ps1)') -ForegroundColor $probeColor
+
+# --- Figma claude.ai connector --------------------------------------------------------
 
 Write-Host ""
 $figma = (& $claude mcp get 'claude.ai Figma' 2>&1) -join "`n"
