@@ -51,7 +51,10 @@ the orchestrator — dense facts, no prose padding.
    recent commit subjects (`[A-Z][A-Z0-9]+-\d+`). Call `mcp__jira__get_issue`;
    extract acceptance criteria (AC list verbatim, numbered) and any figma.com links
    anywhere in the ticket. Failure/no key → say so; the orchestrator will ask for
-   pasted ACs. Never invent ACs.
+   pasted ACs. Never invent ACs. If the ticket or pasted text already cites concrete
+   evidence (file paths, line numbers, keys, function names), carry it into the
+   brief verbatim — qa-analyst and qa-scenario-writer verify/extend it instead of
+   re-discovering it from zero, which is where a lot of run time otherwise goes.
 
 5. **Bootability probe** (backend): entry-point type visibility
    (e-conomic: public `Program`/`Startup`/`*EntryPoint` classes — name the right
@@ -77,6 +80,8 @@ the orchestrator — dense facts, no prose padding.
 ## Brief format (your final message)
 Levels armed · diff stats (files/hunks/untracked) · adapter profile summary (one
 line per test project: framework@version, runner, dialect, placement) · ticket key +
-AC count + Figma links (or "none / needs paste") · bootability verdict per API
+AC count + Figma links (or "none / needs paste") · concrete evidence already cited
+in the AC/bug-report text (file:line, keys, function names — so qa-analyst/
+qa-scenario-writer don't re-derive it) · bootability verdict per API
 project · outbound destinations · contract gate result + capture path · anything
 that will surprise downstream phases. Facts with file-path evidence only.

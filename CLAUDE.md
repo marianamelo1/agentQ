@@ -180,7 +180,9 @@ Load calibration.
   Nx repo → affected selection is `nx affected --target=test`.
 - Jira: ticket key from branch/commits → `mcp__jira__get_issue` → ACs + any Figma
   links. No key / no MCP → ask the user to paste AC text; none → AC alignment is
-  UNVERIFIABLE, say so.
+  UNVERIFIABLE, say so. If the ticket/pasted text already cites concrete evidence
+  (file:line, a key, a function name), carry it into the brief verbatim —
+  Phase 4's agents verify/extend it, never re-derive it from zero.
 - Bootability probe (entry point visibility per repo — e-conomic has public
   Program/Startup/EntryPoint classes; payroll-poc has top-level statements and needs
   the `public partial class Program {}` shim **in the worktree copy only**), DI seam
@@ -227,7 +229,8 @@ parameterized names), xUnit categories via trait `Category=`, NUnit via
 --target=test` on Nx repos. Then `scripts/diff-coverage.ps1` → line + branch diff
 coverage ("of the lines you changed…"), refusing to report if <80% of changed files
 resolve against the coverage paths. The artifact feeds: verdict, diff coverage, TRX
-durations, mutation scoping.
+durations, mutation scoping. Launched in the SAME tool-call batch as Phase 4's agent
+dispatch, not before it — see Phase 4.
 
 ### Phase 3 — Flaky repeats (script, guarded, 0–30 s)
 3× the affected subset (`--no-build`) if the first run took ≤30 s. An outcome flip =
@@ -236,8 +239,20 @@ static mutable state) are only ever **smells** — never report a regex hit as "
 test is flaky".
 
 ### Phase 4 — Analysis & authoring (agents, overlaps Phases 2–3)
-Dispatch qa-analyst and (on cache miss) qa-scenario-writer together, in the same
-message. qa-analyst: regression risk (including cross-repo fan-in from
+Dispatch qa-analyst and (on cache miss) qa-scenario-writer in the SAME tool-call
+batch as Phase 2's script call — real overlap, not two sequential phases: the
+scripts finish in under two minutes, the agents run for several, so a script
+artifact is ready by the time either agent needs it. qa-scenario-writer never
+reads Phase 2/3 output (only intake's `diff-set.json`/`adapter-profiles.json`), so
+it's always safe to start immediately; qa-analyst does its non-coverage-dependent
+sections first and treats a missing `diff-coverage.json`/`test-results.json` as
+"not ready yet," not an error, if it starts before Phase 2 finishes writing them.
+Both agents reuse any concrete file:line/key evidence intake already carried
+forward from the AC/bug-report text instead of re-tracing it from zero — qa-analyst
+verifies/extends it, qa-scenario-writer writes directly against it. This is also
+where duplicate exploration used to creep in: if both agents independently grep the
+same coupling, that's a sign the evidence should have been carried forward from
+intake instead. qa-analyst: regression risk (including cross-repo fan-in from
 `impact-index.json` / `testomat-candidates.json`), AC alignment, Socratic questions
 under the
 contract (≤5; each anchored to file:line evidence — an uncovered branch, a surviving

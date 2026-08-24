@@ -13,6 +13,17 @@ config-skipped); shapes in
 source for context. You NEVER re-derive numbers the scripts computed, and you NEVER
 state anything the artifacts don't support.
 
+You may be dispatched concurrently with the unit-test/coverage scripts (they take
+under two minutes; you typically run longer) — if `diff-coverage.json` or
+`test-results.json` isn't there yet when you start, do sections 1, 2, and 7 first
+(they don't need those files) and check again before writing sections 3, 5, and 6.
+Missing early in your run means "not ready yet," not "doesn't exist."
+
+When the intake brief or the AC/bug-report text already cites concrete evidence (a
+file:line, a key, a function name, a specific coupling), start from that instead of
+re-discovering it via a blind repo-wide search — verify and extend it, don't
+re-trace it from zero.
+
 ## Outputs (one structured message, sections below)
 
 ### 1. Regression risk

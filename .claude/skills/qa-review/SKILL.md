@@ -82,14 +82,28 @@ intent, then map onto these four slots:
    MCP not configured` when absent). Stream one line ("Impact: client 4 refs · 3 BA
    specs · 5 Testomat candidates"). Overlaps step 3; a failure here degrades the
    Impact row only, nothing else.
-3. **Unit + flaky** — `scripts/run-tests.ps1 -Manifest <path>` then
-   `scripts/diff-coverage.ps1`. Stream one-liners ("Unit: 43/43 affected tests
-   passed · changed-line coverage 54%").
-4. **Analysis & authoring** — in the SAME message dispatch `qa-analyst` (always) and
-   `qa-scenario-writer` (only if the scenario cache is stale for this
-   diff/AC hash). They overlap step 3's CPU work. If step 2b ran, point
-   `qa-analyst` at `impact-index.json` + `testomat-candidates.json` too —
-   cross-repo fan-in is part of its regression-risk brief.
+3. **Unit + flaky** — issue `scripts/run-tests.ps1 -Manifest <path>` (chained into
+   `scripts/diff-coverage.ps1`) in the SAME tool-call batch as step 4's agent
+   dispatch — don't wait for this to finish first. Stream a one-liner once it lands
+   ("Unit: 43/43 affected tests passed · changed-line coverage 54%").
+4. **Analysis & authoring** — dispatch `qa-analyst` (always) and `qa-scenario-writer`
+   (only if the scenario cache is stale for this diff/AC hash) together with step
+   3's script call, in the same message — real overlap, not just the two agents
+   together: the scripts finish in under two minutes, the agents run for several, so
+   by the time either needs a script artifact it already exists.
+   - `qa-scenario-writer` never reads step 3's output (only `diff-set.json`/
+     `adapter-profiles.json` from intake) — always safe to start immediately.
+   - `qa-analyst` reads `diff-coverage.json`/`test-results.json` only for its Gap
+     Lattice and flaky sections — it's briefed to do its other sections first and
+     treat those two files as "not ready yet," not an error, if missing when it
+     starts.
+   - Both agents reuse any file:line/key evidence intake already carried forward
+     from the AC/bug-report text instead of re-tracing it from zero — if you notice
+     both agents independently grepping the same coupling on a run, that's a sign
+     step 2 should have carried the evidence forward instead.
+   - If step 2b ran, point `qa-analyst` at `impact-index.json` +
+     `testomat-candidates.json` too — cross-repo fan-in is part of its
+     regression-risk brief.
 5. **💬 Mutation consent** (per `toggles.mutationConsent`) — but first apply your
    own judgment, before even checking the toggle: if the diff has nothing worth
    mutating (pure literal/label/copy/config changes, no branches or business
