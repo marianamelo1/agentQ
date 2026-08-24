@@ -42,20 +42,26 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 2. `.env` exists if a lane needs it (copy from `.env.example`) — local-dev URLs for
    E2E, Pact broker token for the contract lane. Missing values degrade the lane
    honestly; they never block the rest of the review.
-3. MCPs — **Jira**, **Playwright**, and **Testomatio** are pre-declared in
-   `.mcp.json` (approve once when Claude Code prompts on first open); Jira needs
-   `MCP_VISMA_JIRA_PATH` + `JIRA_PERSONAL_ACCESS_TOKEN`, Testomatio needs
-   `TESTOMATIO_API_TOKEN` — all set as real OS environment variables (never in
+3. MCPs — **Playwright** and **Testomatio** are pre-declared in `.mcp.json`
+   (approve once when Claude Code prompts on first open); Testomatio needs
+   `TESTOMATIO_API_TOKEN` set as a real OS environment variable (never in
    agentQ's own `.env` — `.mcp.json` substitution reads the process environment,
    and a token value must never land in a file agentQ manages). **Figma** is a
    claude.ai connector (account-level OAuth), authorized once outside this repo —
-   only needed when the ticket links a design on a frontend branch. Verify all
-   four with `/mcp`. Jira is degradable to pasted AC text; Playwright/Figma are
+   only needed when the ticket links a design on a frontend branch. **Jira is NOT
+   an MCP**: `scripts/jira.ps1` calls the Visma integration-hub gateway directly
+   (read-only `get_issue`), needing only `JIRA_PERSONAL_ACCESS_TOKEN` as an OS
+   env var — set per machine by `scripts/setup-mcp.ps1`, never assumed present
+   (`JIRA_INTEGRATION_HUB_URL` is an optional override; the generic prod gateway
+   is the script's committed default). Verify everything with
+   `scripts/check-mcp.ps1` (includes a live Jira probe) or `/mcp`. Jira is
+   degradable to pasted AC text; Playwright/Figma are
    frontend-branch-only; Testomatio is probed by the impact phase on every run and
    reports `SKIPPED — Testomatio MCP not configured` when its token/server is
    missing on a machine — never assume it works because it works elsewhere. No
    other MCP is used — everything else is CLI (`git`,
-   `dotnet`, `npx jest`/`nx`, `dotnet stryker`, `npx playwright test`, `oasdiff`).
+   `dotnet`, `npx jest`/`nx`, `dotnet stryker`, `npx playwright test`, `oasdiff`,
+   `scripts/jira.ps1`).
 4. .NET SDK on PATH for .NET repos (`dotnet --list-sdks`), Node ≥ the repo's engines
    for JS repos. Docker only matters for consented Testcontainers/compose paths.
 5. One-time per repo, offered on first run (consented, never silent): local
@@ -112,9 +118,10 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 
 **Agents judge, scripts execute.** Six subagents in `.claude/agents/` do only
 judgment work (classification, analysis, test authoring, business-rule mutation
-design, design conformance, report synthesis). Nine deterministic PowerShell scripts
+design, design conformance, report synthesis). Eleven deterministic PowerShell scripts
 in `scripts/` do everything mechanical (git worktrees, running tests, parsing
-coverage, driving Stryker, contract diffs, the risk formula, artifact rendering) —
+coverage, driving Stryker, contract diffs, the Jira ticket fetch, the risk formula,
+artifact rendering) —
 because the tool's credibility depends on the same branch producing the same verdict
 twice, and LLMs don't do byte-identical. Scripts exchange JSON artifacts under
 `workspace/<repo>/<branch>/` with shapes defined in `scripts/CONTRACTS.md` — agents
@@ -184,8 +191,14 @@ Load calibration.
   placement rules → `adapter-profiles.json`). e-conomic: the CI matrices are the
   authoritative test-project inventory, filename globs are the fallback. client:
   Nx repo → affected selection is `nx affected --target=test`.
-- Jira: ticket key from branch/commits → `mcp__jira__get_issue` → ACs + any Figma
-  links. No key / no MCP → ask the user to paste AC text; none → AC alignment is
+- Jira: ticket key from branch/commits → `scripts/jira.ps1` (direct REST
+  `get_issue` against the integration hub — no MCP) → `jira-ticket.json` (ALWAYS
+  written when a key exists; honest `SKIPPED — Jira not configured…` /
+  `DEGRADED — <why>` status when the token is missing or the call fails) → ACs +
+  any Figma links. Ticket itself has no AC-relevant info but carries a
+  `parentKey`/`epicKey` → fetch that key too (`jira-ticket-parent.json`) and
+  extract from the parent, labeling the source ("ACs from parent EC-1200"). No
+  key / SKIPPED / DEGRADED → ask the user to paste AC text; none → AC alignment is
   UNVERIFIABLE, say so. If the ticket/pasted text already cites concrete evidence
   (file:line, a key, a function name), carry it into the brief verbatim —
   Phase 4's agents verify/extend it, never re-derive it from zero.
