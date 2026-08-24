@@ -96,6 +96,46 @@ function Get-LogicalCoreCount {
     try { return [Environment]::ProcessorCount } catch { return 4 }
 }
 
+function Get-JestSummaryCounts {
+    # Parses jest's own "Tests:       X failed, Y skipped, Z passed, N total" console summary
+    # line(s) -- used for `nx affected --target=test`, which fans out to many projects' own
+    # jest reporters with no single machine-readable file this script controls. Two things
+    # verified live and both handled here:
+    #  1) nx runs each affected project as its OWN jest invocation, so there is one "Tests:"
+    #     line PER PROJECT (e.g. "app" and "payroll" separately) -- every match is summed,
+    #     not just the first, or a multi-project run would silently report only one project's
+    #     counts.
+    #  2) under piped/non-tty width detection, nx/jest can hard-wrap this line mid-clause
+    #     (confirmed live: "...1703 " ends one array element, "total" starts the next) --
+    #     when the line doesn't yet contain a complete "<N> total" clause, the immediately
+    #     following line is appended before parsing.
+    # Jest also OMITS a zero-count category entirely (no "0 failed," when nothing failed)
+    # rather than always printing all four, so clauses are parsed by content, not position.
+    param([string[]]$Lines)
+    $result = [ordered]@{ Failed = 0; Skipped = 0; Passed = 0; Total = 0 }
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        # WHY strip ANSI first: nx/jest emit SGR color/bold escape codes around the
+        # numbers and label even under --output-style=static (verified live) -- matching
+        # against the raw string would miss the line or split a number from its label.
+        $line = $Lines[$i] -replace "`e\[[0-9;]*m", ''
+        if ($line -match '^\s*Tests:\s*(.+)$') {
+            $rest = $Matches[1]
+            if ($rest -notmatch '\d+\s*total\s*$' -and ($i + 1) -lt $Lines.Count) {
+                $next = $Lines[$i + 1] -replace "`e\[[0-9;]*m", ''
+                $rest = "$rest $($next.Trim())"
+            }
+            foreach ($part in ($rest -split ',')) {
+                $part = $part.Trim()
+                if     ($part -match '^(\d+)\s+failed$')  { $result.Failed  += [int]$Matches[1] }
+                elseif ($part -match '^(\d+)\s+skipped$') { $result.Skipped += [int]$Matches[1] }
+                elseif ($part -match '^(\d+)\s+passed$')  { $result.Passed  += [int]$Matches[1] }
+                elseif ($part -match '^(\d+)\s+total$')   { $result.Total   += [int]$Matches[1] }
+            }
+        }
+    }
+    return $result
+}
+
 # -----------------------------------------------------------------------------
 # TRX parsing (VSTest logger output  -  shared by every .NET project regardless
 # of xUnit/NUnit/adapter, since all of them run under the same `dotnet test`).
@@ -430,7 +470,9 @@ try {
             }
 
             if (-not $wantCoverage -or $coverageDegraded) {
-                & dotnet test @testArgs --no-build 2>&1 | Out-Null
+                # WHY not `2>&1`: see the nx branch below -- dotnet's own MSBuild/NuGet
+                # warnings on stderr are just as capable of triggering the same crash.
+                & dotnet test @testArgs --no-build | Out-Null
                 $exitCode = $LASTEXITCODE
             }
             $sw.Stop()
@@ -474,11 +516,40 @@ try {
                 $cmd = @('nx', 'affected', '--target=test', "--base=$baseSha", '--output-style=static')
                 if (-not $SkipCoverage) { $cmd += '--coverage' }
                 Push-Location $execRoot
-                try { & npx @cmd 2>&1 | Out-Null; $exitCode = $LASTEXITCODE } finally { Pop-Location }
-                $trx = [ordered]@{ Executed = 0; Passed = 0; Failed = 0; Skipped = 0; Failures = @(); PerTestDurations = @() }
-                # WHY no per-test parse for Nx: `nx affected` fans out to many
-                # projects' own reporters with no single machine-readable file this
-                # script controls; the pass/fail signal is the aggregate exit code.
+                # WHY not `2>&1`: PS 5.1 wraps redirected native stderr lines in ErrorRecords,
+                # which $ErrorActionPreference='Stop' promotes to a terminating error mid-run --
+                # confirmed live: an entirely benign "npm notice run ..." line from npx crashed
+                # this call. Same fix already used in contract-check.ps1/stryker-run.ps1: never
+                # touch stream 2 at all, so it goes straight to the console, not the PS pipeline.
+                # WHY capture stdout (not Out-Null): `nx affected` fans out to many projects'
+                # own jest reporters with no single machine-readable file this script controls,
+                # but jest's own "Tests: X failed, Y skipped, Z passed, N total" summary line is
+                # real, parseable signal -- without it, a failing run reports 0 tests executed
+                # and 0 recorded failures, which is INDISTINGUISHABLE from a build failure to
+                # risk-score.ps1's build-failed heuristic (confirmed live: a real 2-of-1701-test
+                # failure got misclassified as score=100/build-failed).
+                # WHY CI=true FORCE_COLOR=0: without them, nx/jest emit ANSI color codes AND
+                # (confirmed live, reproduced 3x) hard-wrap the "Tests:" line mid-clause under
+                # piped/non-tty width detection -- "...1703 " on one captured line, "total" on
+                # the next -- sometimes dropping the line's plain-text form entirely depending
+                # on timing. Forcing CI mode gives the same clean, single-line, uncolored summary
+                # every time; Get-JestSummaryCounts still defends against a wrap as a fallback.
+                $prevCi = $env:CI; $prevForceColor = $env:FORCE_COLOR
+                $env:CI = 'true'; $env:FORCE_COLOR = '0'
+                try { $nxOutputLines = & npx @cmd; $exitCode = $LASTEXITCODE }
+                finally { $env:CI = $prevCi; $env:FORCE_COLOR = $prevForceColor; Pop-Location }
+                $jestSummary = Get-JestSummaryCounts -Lines $nxOutputLines
+                $trx = [ordered]@{
+                    Executed = $jestSummary.Total; Passed = $jestSummary.Passed
+                    Failed   = $jestSummary.Failed; Skipped = $jestSummary.Skipped
+                    Failures = @(); PerTestDurations = @()
+                }
+                # WHY Failures stays empty even though Failed > 0: nx's fan-out has no single
+                # machine-readable per-test file this script controls, so which SPECIFIC tests
+                # failed isn't captured here -- only the aggregate counts are. A non-zero Failed
+                # with an empty Failures array is a deliberate, honest shape: qa-analyst reads
+                # the console output (available in this run's log) for per-test detail, not a
+                # fabricated Failures entry this script didn't actually observe.
                 $zeroMatch = $false
             }
             else {
@@ -493,7 +564,8 @@ try {
                 if ($changedFiles.Count -gt 0) { $cmd += @('--findRelatedTests') + $changedFiles }
                 if (-not $SkipCoverage) { $cmd += @('--coverage', '--coverageReporters=json-summary') }
                 Push-Location $execRoot
-                try { & npx @cmd 2>&1 | Out-Null; $exitCode = $LASTEXITCODE } finally { Pop-Location }
+                # WHY not `2>&1`: see the -eq 'nx' branch above -- same crash, same fix.
+                try { & npx @cmd | Out-Null; $exitCode = $LASTEXITCODE } finally { Pop-Location }
 
                 $trx = [ordered]@{ Executed = 0; Passed = 0; Failed = 0; Skipped = 0; Failures = @(); PerTestDurations = @() }
                 $zeroMatch = $false
@@ -580,7 +652,7 @@ try {
                 $repeatArgs = @($projAbs, '--no-build', '--no-restore', '--filter', $filter,
                     '--logger', "trx;LogFileName=$trxNameRepeat", '--results-directory', $trxDir,
                     '--', "RunConfiguration.MaxCpuCount=$cores", 'RunConfiguration.TreatNoTestsAsError=true')
-                & dotnet test @repeatArgs 2>&1 | Out-Null
+                & dotnet test @repeatArgs | Out-Null   # WHY not 2>&1: same crash as above
                 $trxRepeat = Read-TrxResult -TrxPath $trxPathRepeat
                 foreach ($ptd in $trxRepeat.PerTestDurations) {
                     $fqn = [string](Get-Prop $ptd 'fqn' '')

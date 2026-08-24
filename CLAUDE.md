@@ -254,7 +254,12 @@ cached by base-SHA + diff-hash + AC-hash — regenerate only what changed.
 
 ### 💬 Consent: mutation
 Ask (unless toggled): files in scope, estimated mutant count (calibrated density),
-time estimate. Auto-skip when no backend code changed.
+time estimate. Auto-skip — never ask — when the diff itself has nothing worth
+mutating: pure literal/label/copy/config changes with no branches, conditionals,
+or business logic (e.g. a UI string rename). This is a value judgment the
+orchestrator makes from the diff, not a consent question — asking "should I test
+something that can't produce a meaningful mutant" wastes the developer's attention.
+State the skip and why in one line; don't just go silent.
 
 ### Phase 5 — Mutation level (scripts + agent: qa-mutation-author)
 Persistent worktree (`scripts/worktree.ps1 -Ensure`; dev's uncommitted diff applied
@@ -283,8 +288,11 @@ signals renormalize the weights (never a silent zero) and lower the stated
 confidence.
 
 ### 💬 Consent: execution
-Ask (unless toggled), listing the Phase-1 outbound destinations. E2E additionally:
-dev-stack health check (never auto-start).
+Unlike mutation, this is never the orchestrator's judgment call to skip — it's
+consent to run code against the developer's machine, so it always follows
+`toggles.executionConsent` literally (`ask` → ask, listing the Phase-1 outbound
+destinations; `always` → proceed and say so; `never` → skip and say so). E2E
+additionally: dev-stack health check (never auto-start).
 
 ### Phase 7 — Component, API & contract execution (scripts, 30 s–2 min)
 - Generated component/API tests run in the worktree via per-project

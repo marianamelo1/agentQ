@@ -92,7 +92,13 @@ function Invoke-Git {
         [Parameter(Mandatory = $true)][string[]]$GitArgs,
         [switch]$AllowFail
     )
-    $out = & git -C $Dir @GitArgs
+    # WHY -c core.longpaths=true on every call: agentQ nests worktrees under its own
+    # workspace/<repoSlug>/<branchSlug>/ path, which adds enough depth that a repo with
+    # long auto-generated filenames (verified: e-conomic/client has NSwag-generated
+    # schema files whose names alone run ~190 chars) blows past Windows' 260-char
+    # MAX_PATH during `worktree add`/`checkout` -- "Filename too long", a hard git
+    # failure, not a PowerShell bug. Harmless to pass when paths are already short.
+    $out = & git -c core.longpaths=true -C $Dir @GitArgs
     $script:LastGitExit = $LASTEXITCODE
     if ($script:LastGitExit -ne 0 -and -not $AllowFail) {
         throw "git -C `"$Dir`" $($GitArgs -join ' ') failed (exit $script:LastGitExit)"
@@ -654,6 +660,22 @@ function Invoke-ModeEnsure {
         # (exactly the state a crashed prior run leaves behind).
         $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'prune')
         $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wt, 'HEAD')
+    }
+
+    # WHY a junction, not a copy: node_modules is gitignored (never checked out into a new
+    # worktree at all -- confirmed: `git worktree add` leaves it entirely absent, so `nx`/`jest`
+    # fail outright with "Could not find Nx modules") and is commonly 1GB+ (verified: 1.3GB on
+    # e-conomic/client) -- copying it per run would violate fast-by-construction. A junction needs
+    # no admin/Developer-Mode elevation (unlike a symbolic link) and survives `git clean -fd`
+    # (clean respects .gitignore by default, so an ignored dir is never swept). Shared, not
+    # copied, so a branch that changes package.json/the lockfile would run against stale deps --
+    # an accepted limitation for now, not silently wrong: dependency-changing branches are rare
+    # and the risk is a false-green from an out-of-date install, not a crash.
+    $repoNodeModules = Join-Path $repo 'node_modules'
+    $wtNodeModules   = Join-Path $wt 'node_modules'
+    if ((Test-Path -LiteralPath $repoNodeModules -PathType Container) -and
+        -not (Test-Path -LiteralPath $wtNodeModules)) {
+        $null = New-Item -ItemType Junction -Path $wtNodeModules -Target $repoNodeModules
     }
 
     # Reuse path cleans first (stale generated tests / mutation leftovers from the previous run);

@@ -90,15 +90,22 @@ intent, then map onto these four slots:
    diff/AC hash). They overlap step 3's CPU work. If step 2b ran, point
    `qa-analyst` at `impact-index.json` + `testomat-candidates.json` too —
    cross-repo fan-in is part of its regression-risk brief.
-5. **💬 Mutation consent** (per `toggles.mutationConsent`; auto-skip if no backend
-   change): show scope + calibrated estimate. On yes:
-   `qa-mutation-author` designs semantic mutants →
-   `scripts/semantic-mutant-driver.ps1` → `scripts/stryker-run.ps1` →
-   `scripts/merge-mutation-reports.ps1`. Stream survivors as they land.
+5. **💬 Mutation consent** (per `toggles.mutationConsent`) — but first apply your
+   own judgment, before even checking the toggle: if the diff has nothing worth
+   mutating (pure literal/label/copy/config changes, no branches or business
+   logic), skip automatically and say why in one line — never ask a consent
+   question whose only possible useful answer is "there's nothing to test."
+   Otherwise show scope + calibrated estimate. On yes: `qa-mutation-author`
+   designs semantic mutants → `scripts/semantic-mutant-driver.ps1` →
+   `scripts/stryker-run.ps1` → `scripts/merge-mutation-reports.ps1`. Stream
+   survivors as they land.
 6. **Risk score** — `scripts/risk-score.ps1`.
-7. **💬 Execution consent** (per `toggles.executionConsent`): disclose intake's
-   outbound destinations; E2E additionally needs the dev-stack health check to pass
-   (never auto-start — hand over the command). On yes:
+7. **💬 Execution consent** (per `toggles.executionConsent`, literally — unlike
+   mutation, this is never a judgment call to bypass: it's consent to run code
+   against the developer's machine, not a value judgment about whether it's
+   worthwhile): disclose intake's outbound destinations; E2E additionally needs
+   the dev-stack health check to pass (never auto-start — hand over the
+   command). On yes:
    `scripts/run-tests.ps1 -GeneratedOnly` (component/API in the worktree,
    anti-vacuity against base AFTER mutation is done) and
    `scripts/contract-check.ps1`. Frontend branches: run cached E2E specs
