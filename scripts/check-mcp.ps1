@@ -4,22 +4,42 @@ check-mcp.ps1  -  read-only status check of everything THIS project depends on:
 prerequisite tools, the MCP servers declared in .mcp.json, the env vars, the
 Figma connector, and a LIVE Jira connectivity probe (scripts/jira.ps1 -Probe -
 Jira is a direct REST lane, not an MCP).
+Works on Windows (PowerShell 5.1+) and macOS/Linux (pwsh 7+).
 
 `/mcp` and `claude mcp list` count every server across every scope (including
 claude.ai connectors); this shows only what agentQ actually uses. Changes
 nothing; safe to run in your own terminal or through Claude Code.
 
 Usage:
-  .\scripts\check-mcp.ps1
+  .\scripts\check-mcp.ps1          (macOS: pwsh ./scripts/check-mcp.ps1)
 #>
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
 
+# $IsWindows doesn't exist on Windows PowerShell 5.1 (which is Windows-only).
+$IsWin = if ($null -ne $IsWindows) { $IsWindows } else { $true }
+
+# Where setup-mcp.ps1 persists env vars on Unix (no User scope there).
+$ProfileFile = if ($IsWin) { $null }
+    elseif ($env:SHELL -match 'zsh')  { Join-Path $HOME '.zshrc' }
+    elseif ($env:SHELL -match 'bash') { Join-Path $HOME '.bashrc' }
+    else                              { Join-Path $HOME '.profile' }
+
+function Test-PersistedEnvVar {
+    # Persisted somewhere a NEW session would see it (User scope / profile line),
+    # regardless of whether this process has it.
+    param([Parameter(Mandatory)][string]$Name)
+    if ($IsWin) { return [bool][Environment]::GetEnvironmentVariable($Name, 'User') }
+    return (Test-Path $ProfileFile) -and
+        (Select-String -Path $ProfileFile -Pattern "^\s*export\s+$Name=" -Quiet)
+}
+
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
 if (-not $claude) {
-    $fallback = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+    $exe = if ($IsWin) { 'claude.exe' } else { 'claude' }
+    $fallback = Join-Path $HOME (Join-Path '.local' (Join-Path 'bin' $exe))
     if (Test-Path $fallback) { $claude = $fallback }
     else { throw "claude CLI not found on PATH or at $fallback" }
 }
@@ -66,20 +86,21 @@ $vars = @(
     @{ Name = 'TESTOMATIO_API_TOKEN';       Optional = $true;  Suffix = ' (optional - impact/Testomat lane only)' }
 )
 foreach ($v in $vars) {
-    $user = [Environment]::GetEnvironmentVariable($v.Name, 'User')
-    if (-not $user) {
-        $color = if ($v.Optional) { 'Yellow' } else { 'Red' }
-        Write-Host "[missing] $($v.Name)$($v.Suffix) - run .\scripts\setup-mcp.ps1" -ForegroundColor $color
-    } elseif (-not [Environment]::GetEnvironmentVariable($v.Name, 'Process')) {
+    $process = [Environment]::GetEnvironmentVariable($v.Name, 'Process')
+    $persisted = Test-PersistedEnvVar -Name $v.Name
+    if ($process) {
+        Write-Host "[set] $($v.Name)$($v.Suffix)" -ForegroundColor Green
+    } elseif ($persisted) {
         Write-Host "[set] $($v.Name)$($v.Suffix) - but not in this session; restart Claude Code / this terminal" -ForegroundColor Yellow
     } else {
-        Write-Host "[set] $($v.Name)$($v.Suffix)" -ForegroundColor Green
+        $color = if ($v.Optional) { 'Yellow' } else { 'Red' }
+        Write-Host "[missing] $($v.Name)$($v.Suffix) - run .\scripts\setup-mcp.ps1" -ForegroundColor $color
     }
 }
-if ([Environment]::GetEnvironmentVariable('JIRA_INTEGRATION_HUB_URL', 'User')) {
+if ([Environment]::GetEnvironmentVariable('JIRA_INTEGRATION_HUB_URL', 'Process') -or (Test-PersistedEnvVar -Name 'JIRA_INTEGRATION_HUB_URL')) {
     Write-Host "[set] JIRA_INTEGRATION_HUB_URL (optional override - jira.ps1 defaults to the generic prod gateway)" -ForegroundColor Green
 }
-if ([Environment]::GetEnvironmentVariable('MCP_VISMA_JIRA_PATH', 'User')) {
+if ([Environment]::GetEnvironmentVariable('MCP_VISMA_JIRA_PATH', 'Process') -or (Test-PersistedEnvVar -Name 'MCP_VISMA_JIRA_PATH')) {
     Write-Host "[obsolete] MCP_VISMA_JIRA_PATH - the Jira MCP is retired; clear with: .\scripts\setup-mcp.ps1 -Reset MCP_VISMA_JIRA_PATH" -ForegroundColor Yellow
 }
 

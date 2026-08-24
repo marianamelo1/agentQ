@@ -47,12 +47,23 @@ $EpicLinkFieldId = 'customfield_13061'
 $MaxComments = 10
 
 function Get-EnvVarAnyScope {
-    # Process first; User-scope fallback lets a token set moments ago by
-    # setup-mcp.ps1 work without restarting the terminal.
+    # Process first; the fallback lets a token set moments ago by setup-mcp.ps1
+    # work without restarting the terminal. On Windows that's the User scope;
+    # on macOS/Linux (no User scope) it's the export line setup-mcp.ps1 wrote
+    # to the shell profile.
     param([Parameter(Mandatory)][string]$Name)
     $v = [Environment]::GetEnvironmentVariable($Name, 'Process')
-    if (-not $v) { $v = [Environment]::GetEnvironmentVariable($Name, 'User') }
-    return $v
+    if ($v) { return $v }
+    $isWin = if ($null -ne $IsWindows) { $IsWindows } else { $true }
+    if ($isWin) { return [Environment]::GetEnvironmentVariable($Name, 'User') }
+    $profileFile = if ($env:SHELL -match 'zsh') { Join-Path $HOME '.zshrc' }
+        elseif ($env:SHELL -match 'bash') { Join-Path $HOME '.bashrc' }
+        else { Join-Path $HOME '.profile' }
+    if (Test-Path $profileFile) {
+        $line = Select-String -Path $profileFile -Pattern "^\s*export\s+$Name=" | Select-Object -Last 1
+        if ($line) { return ($line.Line -replace "^\s*export\s+$Name=", '').Trim("'", '"') }
+    }
+    return $null
 }
 
 function Resolve-IssueKey {
