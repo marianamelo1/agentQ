@@ -154,8 +154,8 @@ tripping one degrades honestly, never silently.
 - Warm-start everything: persistent per-branch worktree + build output,
   adapter-profile cache, scenario/spec cache, mutation results keyed by file-content
   hash, `WithReuse` containers.
-- The report ends with a time ledger (per-phase seconds) so slowness is visible and
-  tunable.
+- The evidence file ends with a time ledger (per-phase seconds) so slowness is
+  visible and tunable.
 
 ## Workflow
 
@@ -403,16 +403,26 @@ side evidence) vs `NEEDS HUMAN JUDGMENT` (never asserted as a defect). Scoped to
 linked frames only. No link → `SKIPPED — no design linked in ticket`.
 
 ### Phase 8 — Report (agent: qa-report-synthesizer)
-Run summary right under the header table (which agents were actually called this
-run, a Phase/Actor/Seconds table, total wall-clock — all verbatim from
-`time-ledger.json`, which the orchestrator appends to as each phase completes),
-then the consequence-first verdict block (see Reporting below), capability matrix,
-impact map + manual testing section (concise — see Reporting), per-level detail, Socratic questions,
-collapsed Full-evidence section (signal
-ledger, weights, methodology, the same phases again with outcome instead of
-actor). Save to
-`reports/<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md` (+ evidence dir).
-Append score→outcome to `workspace/<repo>/history.jsonl`. Then ask **which generated
+Writes **two files** (all binding rules in Reporting below):
+- **Main report** — `reports/<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md`:
+  max 2 pages, plain language for a reader with no QA background and no
+  full-application context, feature/user-flow framing (never file:line), the
+  fixed icon set. Header line with result → what the branch does → ≤3 findings
+  (each with a 🛠️ Do-this action) → ✅ What's good bullets → ⚖️ merge risk in one
+  plain sentence → ❓ ≤3 questions → 🖐️ manual-check suggestions (when any) →
+  🔍 what-was-checked table → 🧪 keep-these-tests list → 📄 evidence-file link.
+- **Evidence file** — same name + `-evidence.md`: everything technical — run
+  summary (agents actually called, a Phase/Actor/Seconds table, total
+  wall-clock — all verbatim from `time-ledger.json`, which the orchestrator
+  appends to as each phase completes), per-finding file:line detail, capability
+  matrix, impact map + manual-testing detail, per-level sections in the
+  evidence-qualified vocabulary, the generated-scenarios table, the full
+  Socratic questions, the risk-signal ledger, the time ledger with outcomes,
+  capture provenance, and the command log (+ evidence dir).
+After the agent writes both, the orchestrator re-saves them as UTF-8 **with BOM**
+(one PowerShell `[IO.File]::WriteAllText` with `UTF8Encoding($true)`) so Windows
+editors render the icons and dashes correctly. Append score→outcome to
+`workspace/<repo>/history.jsonl`. Then ask **which generated
 tests to keep** — on explicit yes, apply them to the product repo as a diff the
 developer reviewed in chat (placement per the adapter profile — payroll's
 `test_placement` allow-list is enforced there).
@@ -423,35 +433,81 @@ stryker-unchanged orphans, product repo untouched.
 
 ## Reporting (the rules that keep the tool trusted)
 
-**The verdict block leads with consequences, not statistics** — max 3 headline
-items, ranked by blast radius (breaking contract > silent wrong behavior > missing
-test), each = concrete failure + file:line + the one action that fixes it now:
+**Audience first.** The main report is for a developer with **no QA background
+and no full-application context**: max 2 pages, plain everyday words, every
+finding framed by the feature and the user flow ("a settled payment that fails
+to post disappears silently") — never opened with a class name or line number.
+Everything technical lives in the sibling `-evidence.md` file, linked once at
+the bottom. The honesty rules bind both files.
+
+**Fixed icon set** — the same icons in every report, so readers learn to scan:
+🔴/🟢 overall result · ❌ problem found · 🛠️ the one action that fixes it ·
+✅ good / passed · ⚠️ needs attention or couldn't be checked · ⏭️ not needed
+this run · ❓ question for the team · 🖐️ manual-check suggestion · 🧪 ready-made
+test · ⚖️ merge risk · 📄 evidence-file pointer · 🧭 what the branch does.
+Never improvise new icons.
+
+**Plain-language rule** — no QA jargon in the main report; fixed phrasings:
+- surviving mutant → "we deliberately broke this rule and every test stayed
+  green"
+- diff coverage 70% → "about 7 in 10 changed lines run under a test (counting
+  only tests related to this branch)" — never a global percentage
+- breaking contract change → "a change that breaks anyone already using this
+  API"
+- flaky test → "a test that passes and fails randomly"
+- vacuous test → "a test that would pass even without your change"
+The precise vocabulary (scenario states, AC evidence grades, mutant ids, oasdiff
+rule ids) is mandatory in the evidence file and forbidden in the main report.
+
+**Main report structure** (`templates/report/report-template.md`; hard caps —
+cut, don't compress; overflow goes to the evidence file):
 
 ```
-🔴 Not ready yet — 3 things a reviewer (or production) would catch:
+# 🧾 QA review — <repo> · <ticket>
+<branch> · <date> · **Result: 🔴 Not ready yet | 🟢 Ready to open**
+**🧭 What this branch does:** one plain sentence.
 
-1. A wrong VAT rate would ship silently — all 7 tests covering VatCalculator still
-   pass when the rate is changed 0.25 → 0.20 (VatCalculator.cs:42).
-   → strengthen the assert in VatCalculatorTests.StandardRate_Applied
-2. AC-3 ("negative totals must be rejected") has no test — the `total < 0` branch
-   never runs.  → generated test ready: Apply_NegativeTotal_Throws — keep it?
-3. Breaking API change: `dueDate` removed from the /invoices response — any consumer
-   reading it breaks. (oasdiff: response-property-removed)
-   → intentional? version the endpoint; otherwise restore the field.
+## ❌ N things to fix first          (max 3 — or "## ✅ Nothing blocking found")
+**1. <plain title — what would go wrong for a user/partner>**
+2–3 plain sentences on the consequence and why nothing catches it today.
+🛠️ **Do this:** the one action doable right now.
 
-✅ Solid: 43/43 tests covering your change pass · component + API scenarios green ·
-   no flaky signals · design matches the linked Figma frames
+## ✅ What's good                     (bullet points, one concise sentence each)
+**⚖️ Merge risk: <band>** — one plain sentence why.
 
-Merge risk: Elevated · confidence: moderate — mutation covered 2 of 3 changed
-files, staging E2E not run. Full evidence ↓
+## ❓ Questions for the team          (max 3; full set in the evidence file)
+## 🖐️ Worth checking by hand         (only when Phase 1c found candidates; ≤3)
+## 🔍 What was checked               (one table: plain question per row, ✅/⚠️/❌/⏭️)
+## 🧪 Ready-made tests (N) — keep them?   (numbered one-liners, no paths)
+📄 Full technical detail: <name>-evidence.md
 ```
 
-A clean run gets the inverse — `🟢 Ready to open — nothing blocking found` + the ✅
-line — because telling a developer they're *done* is what builds the habit.
+- Finding ranking: breaking API > silent wrong behavior > missing test. A clean
+  run gets `🟢 Ready to open` + the ✅ bullets — telling a developer they're
+  *done* is what builds the habit.
+- In the 🔍 table a skipped or degraded check reads `⚠️ couldn't check — <plain
+  why>` — never a pass, never an omitted row. Merge risk band verbatim from
+  `risk-score.json`; never a "probability of passing CI".
 
+**Evidence file** (`templates/report/evidence-template.md`) holds everything the
+main report dropped, at full rigor:
+- Run summary + per-finding technical detail (file:line, mutant ids, coverage
+  numbers, test names — one subsection per main-report finding).
 - Capability matrix: one row per level **plus one Impact row** (cross-repo /
   UI-automation / Testomat), exactly one of `RAN` / `DEGRADED — <why>` /
-  `SKIPPED — <why>`. A skipped stage can never read as a pass.
+  `SKIPPED — <why>`. A skipped stage can never read as a pass; the Impact row
+  appears in every report (config-skipped → `SKIPPED — disabled by config`).
+- Impact map (only when the phase ran): ≤3 evidence items per lane (same repo /
+  other repos / UI-automation / Testomat / Pact consumers), `+N more` pointing
+  at `impact-index.json`; UI-automation and Testomat hits are always
+  *candidates (keyword match)*, never "affected" or failures; always closes
+  with "no signal ≠ not affected". A main-report finding may cite impact reach
+  only when attached to a confirmed finding.
+- Manual testing detail (whenever Phase 1c ran, independent of the Impact map):
+  ≤5 candidates, `diff-seed` matches ranked above `ticket-link` matches,
+  `+N more` pointing at the artifact. Always *candidates (keyword/ticket
+  match)* — never "you must test this". Toggled off or no Testomatio MCP →
+  state that plainly, never omit silently.
 - Scenario states, only: `EXECUTED — PASSED` / `EXECUTED — FAILED (finding)` /
   `GENERATED, COMPILES, NOT EXECUTED — <reason> — run: <command>` /
   `GENERATED, NOT EXECUTED — <reason>`.
@@ -460,33 +516,18 @@ line — because telling a developer they're *done* is what builds the habit.
   static reading only` ≠ `NOT MET — <observed vs expected>` ≠ `UNVERIFIABLE —
   <reason>`.
 - Mutation reports **absolute survivors** ("a wrong X would ship"), never a
-  percentage — a scoped mutation score compares to nothing. Suppress `NoCoverage`
-  mutants (they're coverage findings).
-- Contract: ERR → "breaking change to the documented API contract (rule <id>) — any
-  consumer relying on this shape will break"; WARN → "potentially breaking — needs
-  human judgment"; only Pact findings may name a consumer.
-- Impact matrix row appears in every report; the impact map section only when the
-  phase ran (config-skipped → the row alone says `SKIPPED — disabled by config`).
-- Impact map (when the phase ran): one concise block — ≤3 evidence items per lane (same
-  repo / other repos / UI-automation / Testomat / Pact consumers), `+N more`
-  pointing at `impact-index.json`; UI-automation and Testomat hits are always
-  *candidates (keyword match)*, never "affected" or failures; always closes with
-  "no signal ≠ not affected". A headline verdict item may cite impact reach only
-  when attached to a confirmed finding (e.g. a breaking contract change whose
-  endpoint named BA specs exercise).
-- Manual testing section appears whenever Phase 1c ran — independent of the
-  Impact map above, so it can appear even when that section is config-skipped.
-  ≤5 candidates from `manual-test-candidates.json`, `diff-seed` matches ranked
-  above `ticket-link` matches, `+N more` pointing at the artifact. Always
-  *candidates (keyword/ticket match)* — never "you must test this", never
-  "affected". Toggled off or no Testomatio MCP → state that plainly, never omit
-  the section silently.
-- Diff coverage is always "coverage of changed lines, from tests related to this
-  branch" — never presented as a global percentage.
-- Never "riskiest tests" — three named lists: *most likely to catch a regression
-  here* / *flaky-risk smells (static)* / *observed flaky (flipped across runs)*.
-- Never a "probability of passing CI". The score is a labeled heuristic; missing
-  signals show as reduced confidence, and the methodology lives below the fold.
+  percentage — a scoped mutation score compares to nothing. Suppress
+  `NoCoverage` mutants (they're coverage findings).
+- Contract: ERR → "breaking change to the documented API contract (rule <id>) —
+  any consumer relying on this shape will break"; WARN → "potentially
+  breaking — needs human judgment"; only Pact findings may name a consumer.
+- Diff coverage is always "coverage of changed lines, from tests related to
+  this branch". Never "riskiest tests" — three named lists: *most likely to
+  catch a regression here* / *flaky-risk smells (static)* / *observed flaky
+  (flipped across runs)*.
+- Risk score: signal ledger + methodology ("heuristic scored from this diff
+  only; not calibrated against CI history"); missing signals show as reduced
+  confidence, never silently absent.
 
 ## Subagents
 
