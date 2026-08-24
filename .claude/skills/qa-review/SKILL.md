@@ -9,6 +9,10 @@ You are the primary agent for an agentQ run. `CLAUDE.md` is the authoritative
 workflow document — phases, safety rules, reporting rules. This skill is the
 run-loop checklist. Artifact shapes: `scripts/CONTRACTS.md`.
 
+All `scripts/*.ps1` are cross-platform PowerShell. In a PowerShell session invoke
+them directly; from a bash/zsh shell (macOS/Linux) prefix with `pwsh`, e.g.
+`pwsh scripts/worktree.ps1 -DetectRepo …`.
+
 ## Inputs
 All inputs are optional and order-independent — provide whichever you know, as plain
 language or as flags (`--branch feature/EC-8876 --ticket EC-8876`), or nothing but a

@@ -224,9 +224,8 @@ function Restore-BranchState {
     # has not `git add`ed yet is exactly the code most in need of QA  -  plain diff misses it.
     $copied = 0
     foreach ($rel in (Get-DevUntrackedFiles -Repo $Repo)) {
-        $relWin = $rel -replace '/', '\'
-        $src = Join-Path $Repo $relWin
-        $dst = Join-Path $WorktreeDir $relWin
+        $src = Join-Path $Repo $rel
+        $dst = Join-Path $WorktreeDir $rel
         $dstDir = Split-Path -Parent $dst
         if (-not (Test-Path -LiteralPath $dstDir)) {
             New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
@@ -704,7 +703,7 @@ function Invoke-ModeFlipToBase {
     # generated test pass vacuously against base  -  the exact failure anti-vacuity exists to catch.
     $removed = 0
     foreach ($rel in (Get-DevUntrackedFiles -Repo $m.repoPath)) {
-        $p = Join-Path $wt ($rel -replace '/', '\')
+        $p = Join-Path $wt $rel
         if (Test-Path -LiteralPath $p -PathType Leaf) {
             Remove-Item -LiteralPath $p -Force
             $removed++

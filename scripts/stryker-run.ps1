@@ -50,6 +50,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# $IsWindows doesn't exist on Windows PowerShell 5.1 (which is Windows-only).
+$script:IsWin = if ($null -ne $IsWindows) { $IsWindows } else { $true }
+
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------
@@ -84,16 +87,37 @@ function Write-JsonFileNoBom {
 
 function Stop-ProcessTree {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
-    # WHY taskkill /T: Stryker spawns testhost/vstest child processes; killing only
+    # WHY a tree kill: Stryker spawns testhost/vstest child processes; killing only
     # the parent orphans them mid-mutation and they keep the mutated DLLs locked,
     # which would break the backup restore below.
-    # WHY via cmd with >nul 2>&1: under $ErrorActionPreference='Stop', PS 5.1 turns
-    # redirected native stderr into a terminating NativeCommandError  -  cmd swallows
-    # taskkill's output (including the benign "not found" race when the process
-    # exited between the timeout check and the kill).
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+    if ($script:IsWin) {
+        # WHY via cmd with >nul 2>&1: under $ErrorActionPreference='Stop', PS 5.1 turns
+        # redirected native stderr into a terminating NativeCommandError  -  cmd swallows
+        # taskkill's output (including the benign "not found" race when the process
+        # exited between the timeout check and the kill).
+        try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+    }
+    else {
+        # macOS/Linux: enumerate descendants via pgrep -P (present on both), then kill
+        # children-first so nothing is reparented to init and lost mid-walk.
+        $tree = New-Object System.Collections.Generic.List[int]
+        $queue = New-Object System.Collections.Generic.Queue[int]
+        $queue.Enqueue($ProcessId)
+        while ($queue.Count -gt 0) {
+            $cur = $queue.Dequeue()
+            $tree.Add($cur)
+            $kids = try { & pgrep -P $cur 2>$null } catch { @() }
+            foreach ($k in @($kids)) {
+                if ("$k" -match '^\d+$') { $queue.Enqueue([int]$k) }
+            }
+        }
+        $tree.Reverse()
+        foreach ($cur in $tree) {
+            try { & kill -9 $cur 2>$null | Out-Null } catch { }
+        }
+    }
     $ErrorActionPreference = $prev
 }
 
@@ -509,7 +533,7 @@ try {
         $testProjDirRel = ''
         if ($li -ge 0) { $testProjDirRel = $testProjRel.Substring(0, $li) }
         $testProjDirAbs = $worktreeDir
-        if ($testProjDirRel -ne '') { $testProjDirAbs = Join-Path $worktreeDir ($testProjDirRel -replace '/', '\') }
+        if ($testProjDirRel -ne '') { $testProjDirAbs = Join-Path $worktreeDir $testProjDirRel }
         if (-not (Test-Path -LiteralPath $testProjDirAbs -PathType Container)) {
             $entries.Add((New-ProjectEntry -Project $testProjRel -Skipped $true `
                         -Reason 'test project directory not found in the worktree  -  re-run worktree.ps1 -Ensure'))
@@ -552,7 +576,7 @@ try {
                 $uncov = $null
                 $ck = $cf.Path.ToLowerInvariant()
                 if ($uncoveredMap.ContainsKey($ck)) { $uncov = $uncoveredMap[$ck] }
-                $absPath = Join-Path $worktreeDir ($cf.Path -replace '/', '\')
+                $absPath = Join-Path $worktreeDir $cf.Path
                 $g = Get-FileMutateGlobs -File $cf -RelPath $relPath -UncoveredLines $uncov `
                     -SpanScope $spanScope -AbsPath $absPath
                 if ($g.DroppedByCoverage) { $droppedByCov++; continue }
@@ -608,7 +632,7 @@ try {
     # ---------------- step 1: pinned local tool, WORKTREE only ----------------
     if ($plannedRuns.Count -gt 0) {
         $toolLogBase = Join-Path $logsDir 'tool'
-        $toolsManifestPath = Join-Path $worktreeDir '.config\dotnet-tools.json'
+        $toolsManifestPath = Join-Path $worktreeDir '.config/dotnet-tools.json'
         $hasStryker = $false
         if (Test-Path -LiteralPath $toolsManifestPath) {
             $tm = Read-JsonFile -Path $toolsManifestPath
@@ -743,7 +767,7 @@ try {
         # an nx project file  -  StrykerJS must run from the package directory
         $ppTrim = $pp.TrimEnd('/')
         $projDirRel = $ppTrim
-        $cand = Join-Path $worktreeDir ($ppTrim -replace '/', '\')
+        $cand = Join-Path $worktreeDir $ppTrim
         if (-not (Test-Path -LiteralPath $cand -PathType Container)) {
             $li3 = $ppTrim.LastIndexOf('/')
             if ($li3 -ge 0) { $projDirRel = $ppTrim.Substring(0, $li3) } else { $projDirRel = '' }
@@ -765,7 +789,7 @@ try {
         }
 
         $projDirAbs = $worktreeDir
-        if ($projDirRel -ne '') { $projDirAbs = Join-Path $worktreeDir ($projDirRel -replace '/', '\') }
+        if ($projDirRel -ne '') { $projDirAbs = Join-Path $worktreeDir $projDirRel }
 
         # WHY the devDependency gate: agentQ never adds packages to (or edits the
         # package.json of) a product repo, and a floating npx install would be exactly that.
@@ -790,7 +814,7 @@ try {
         $logBase = Join-Path $logsDir $logKey
 
         # idempotency: clear stale JS reports so a previous run's file is never re-read
-        $jsReportCandidates = @('reports\mutation\mutation.json', 'reports\mutation\mutation-report.json')
+        $jsReportCandidates = @('reports/mutation/mutation.json', 'reports/mutation/mutation-report.json')
         foreach ($candRel in $jsReportCandidates) {
             $p2 = Join-Path $projDirAbs $candRel
             if (Test-Path -LiteralPath $p2) { Remove-Item -LiteralPath $p2 -Force }
@@ -799,10 +823,18 @@ try {
         # --incremental: StrykerJS's own supported diff cache (unlike .NET's broken --since).
         # --reporters json,progress is added on top of the spec's command line because the
         # json report is the only machine-readable source for summary.json counts.
-        # WHY cmd.exe: npx is a .cmd shim  -  cmd resolves it reliably under Start-Process.
-        $jsArgLine = ('/d /c npx stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
-        $res = Invoke-Native -FilePath 'cmd.exe' -Arguments $jsArgLine `
-            -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
+        # WHY cmd.exe on Windows: npx is a .cmd shim there  -  cmd resolves it reliably
+        # under Start-Process. On macOS/Linux npx is a real executable, run it directly.
+        if ($script:IsWin) {
+            $jsArgLine = ('/d /c npx stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
+            $res = Invoke-Native -FilePath 'cmd.exe' -Arguments $jsArgLine `
+                -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
+        }
+        else {
+            $jsArgLine = ('stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
+            $res = Invoke-Native -FilePath 'npx' -Arguments $jsArgLine `
+                -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
+        }
         if ($res.TimedOut) {
             $entries.Add((New-TimeoutEntry -Project $pp `
                         -Prog (Read-ConsoleProgress -LogPath $res.OutLog) -Minutes $TimeoutMinutes))

@@ -388,7 +388,7 @@ try {
 
         if ($isDotnet) {
             $projRel = ([string](Get-Prop $prof 'projectPath' '')) -replace '\\', '/'
-            $projAbs = Join-Path $execRoot ($projRel -replace '/', '\')
+            $projAbs = Join-Path $execRoot $projRel
             if (-not (Test-Path -LiteralPath $projAbs)) {
                 $null = $runs.Add([ordered]@{
                     projectPath = $projRel; command = $null; exitCode = -1
@@ -557,7 +557,7 @@ try {
                 if ($null -ne $diffSet) {
                     foreach ($f in @(Get-Prop $diffSet 'files' @())) {
                         $p = [string](Get-Prop $f 'path' '')
-                        if ($p -match '\.(js|jsx|ts|tsx)$') { $changedFiles += (Join-Path $repoPath ($p -replace '/', '\')) }
+                        if ($p -match '\.(js|jsx|ts|tsx)$') { $changedFiles += (Join-Path $repoPath $p) }
                     }
                 }
                 $cmd = @('jest', '--ci', '--silent', '--passWithNoTests', '--json', "--outputFile=$resultsFile")
@@ -642,7 +642,7 @@ try {
                 $framework = [string](Get-Prop $prof 'framework' '')
                 if (-not (@('xunit', 'nunit3', 'nunit4') -contains $framework)) { continue }
                 $projRel = ([string](Get-Prop $prof 'projectPath' '')) -replace '\\', '/'
-                $projAbs = Join-Path $execRoot ($projRel -replace '/', '\')
+                $projAbs = Join-Path $execRoot $projRel
                 if (-not (Test-Path -LiteralPath $projAbs)) { continue }
                 $classes = Get-AffectedTestClasses -Profile $prof -DiffSet $diffSet
                 $filter = Get-DotnetTestFilter -Framework $framework -TestClasses $classes
