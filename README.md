@@ -16,7 +16,7 @@ The full workflow, safety rules, and phase-by-phase detail live in
 
 ## Quickstart
 
-1. Clone this repo and open it in Claude Code.
+1. Clone this repo and open it in Claude Code/CLi or Visual Studio with Claude.
 2. Copy the two example configs:
    - `.claude/qa-agent-config.example.jsonc` → `.claude/qa-agent-config.jsonc`
      (point `productRepos` at your real local checkouts)
