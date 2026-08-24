@@ -121,8 +121,32 @@ $testResults = Read-JsonArtifact (Join-Path $workspaceDir 'test-results.json')
 $mut         = Read-JsonArtifact (Join-Path $workspaceDir 'mutation-report.json')
 $contract    = Read-JsonArtifact (Join-Path $workspaceDir 'contract-report.json')
 $adapters    = Read-JsonArtifact (Join-Path $workspaceDir 'adapter-profiles.json')
+$mutantsRaw  = Read-JsonArtifact (Join-Path $workspaceDir 'mutants.json')
 
 $adapterProjects = @(Get-Prop $adapters 'projects' @())
+
+# WHY this counts toward testToSourceBalance (s6 below), not just informationally: a
+# developer's diff having zero test-line changes isn't the whole truth when agentQ's own
+# Phase 7 generated and PROVED (anti-vacuity: fails on base, passes on branch) a scenario
+# closing exactly that gap -- see CONTRACTS.md "testToSourceBalance and generated
+# scenarios". Only proven-non-vacuous evidence counts; GENERATED_NOT_EXECUTED or
+# static_only earns nothing.
+$verifiedGeneratedCount = 0
+$scenariosDir = Join-Path $workspaceDir 'scenarios'
+if (Test-Path -LiteralPath $scenariosDir -PathType Container) {
+    foreach ($sf in (Get-ChildItem -LiteralPath $scenariosDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        $sc = Read-JsonArtifact $sf.FullName
+        if ($null -eq $sc) { continue }
+        $execState = [string](Get-Prop $sc 'executionState' '')
+        $vacuity   = [string](Get-Prop $sc 'vacuityGrade' '')
+        if ($execState -eq 'EXECUTED_PASSED' -and $vacuity -eq 'verified_against_base') { $verifiedGeneratedCount++ }
+    }
+}
+if ($null -ne $mutantsRaw) {
+    foreach ($mEntry in @(Get-Prop $mutantsRaw 'mutants' @())) {
+        if ($null -ne (Get-Prop $mEntry 'suggestedFix' $null)) { $verifiedGeneratedCount++ }
+    }
+}
 
 # ---------------------------------------------------------------------------------------
 # Changed-file table from diff-set (feeds s6, s7 and topTests)
@@ -306,6 +330,14 @@ if ($null -ne $diffSet) {
         # lines; the shortfall below that scales the signal linearly.
         $s6 = Clamp01 (1.0 - ($testLines / (0.3 * [double]$srcLines)))
     }
+    # Credit verified generated evidence against the diff-only penalty (see CONTRACTS.md
+    # "testToSourceBalance and generated scenarios"): each proven-non-vacuous generated
+    # scenario or mutation suggestedFix is worth 0.5 -- two of them fully offset a
+    # maxed-out 1.0 penalty. Never pushes s6 negative; a diff that already has its own
+    # tests is not penalized further for lacking generated ones.
+    if ($verifiedGeneratedCount -gt 0) {
+        $s6 = Clamp01 ($s6 - (0.5 * [double]$verifiedGeneratedCount))
+    }
     $signals.Add([pscustomobject]@{ Name = 'testToSourceBalance'; Weight = 0.09; Available = $true; Value = [math]::Round([double]$s6, 4); S = $s6 })
 } else {
     $signals.Add([pscustomobject]@{ Name = 'testToSourceBalance'; Weight = 0.09; Available = $false; Value = $null; S = 0.0 })
@@ -386,25 +418,41 @@ if ($buildFailed) {
         # forbids. That is an invocation-order failure, so the script fails loudly.
         throw 'risk-score: no input artifacts available - refusing to fabricate a score from zero evidence (run Phases 1-5 first)'
     }
-    $raw = 0.0
-    foreach ($a in $availableSignals) { $raw += ([double]$a.Weight / $W) * [double]$a.S }
+    $rawFromAvailable = 0.0
+    foreach ($a in $availableSignals) { $rawFromAvailable += ([double]$a.Weight / $W) * [double]$a.S }
+    # WHY blend toward NEUTRAL_UNKNOWN by available weight-coverage (see CONTRACTS.md
+    # "Sparse-evidence dampening"): pure renormalization treats whatever signals ARE
+    # available as if they were the whole picture. Verified live: with only 14% of the
+    # documented weight available, a single maxed-out signal (testToSourceBalance)
+    # dragged a 3-line, anti-vacuity-verified fix to "Elevated". Full coverage (W=1)
+    # reduces to the plain weighted sum, unchanged; sparse coverage pulls toward the
+    # baseline instead of amplifying whatever little evidence exists.
+    # WHY 0.35, not a dead-neutral 0.5: the band table is NOT symmetric around the
+    # midpoint (Low 0-20 | Moderate 21-45 | Elevated 46-70 | High 71-100) -- a 0.5
+    # "coin-flip" default for total absence of evidence lands at score 50, which is
+    # Elevated by construction, the same band as genuine risk evidence. "we know
+    # nothing" and "we know this is risky" must not read the same. 0.35 puts a
+    # 100%-unknown case (W=0) comfortably in the middle of Moderate instead.
+    $NEUTRAL_UNKNOWN = 0.35
+    $raw = ($W * $rawFromAvailable) + ((1.0 - $W) * $NEUTRAL_UNKNOWN)
     $score = [math]::Max(0, [math]::Min(100, (Round-Int (100.0 * $raw))))
 }
 $score = [int]$score
 $band = Get-Band $score
 
-# Signal ledger rows. 'weight' is the EFFECTIVE (renormalized) weight so that
-# contribution = round(100 * weight * s) is reproducible from the row; when nothing is
-# missing it equals the documented weight. Unavailable rows keep the documented weight
-# for transparency, contribute 0, and are named in missingSignals. Under a hard override
-# the contributions remain informational  -  the score is the override, by design.
+# Signal ledger rows. 'weight' and 'contribution' use each signal's ORIGINAL documented
+# weight, never renormalized -- so contribution = round(100 * weight * s) is reproducible
+# from the row AND every row's contribution (available signals + the synthetic
+# unknownEvidence row below) sums to `score`, by construction of the dampened formula
+# above. Unavailable rows keep the documented weight for transparency, contribute 0, and
+# are named in missingSignals. Under a hard override the contributions remain
+# informational  -  the score is the override, by design.
 $signalRows = @()
 foreach ($sg in $signals) {
     $effW = [math]::Round([double]$sg.Weight, 4)
     $contrib = 0
-    if ($sg.Available -and $W -gt 0.0) {
-        $effW = [math]::Round([double]$sg.Weight / $W, 4)
-        $contrib = Round-Int (100.0 * ([double]$sg.Weight / $W) * [double]$sg.S)
+    if ($sg.Available) {
+        $contrib = Round-Int (100.0 * [double]$sg.Weight * [double]$sg.S)
     }
     $signalRows += [ordered]@{
         name         = $sg.Name
@@ -412,6 +460,20 @@ foreach ($sg in $signals) {
         weight       = $effW
         contribution = $contrib
         available    = [bool]$sg.Available
+    }
+}
+if ($null -eq $hardOverride -and $missing.Count -gt 0) {
+    # The neutral-baseline share of the score from the "Sparse-evidence dampening" blend
+    # above, surfaced as its own ledger row so the table's contributions still sum to
+    # `score` instead of silently falling short by whatever the missing signals would
+    # have contributed.
+    $unknownWeight = [math]::Round(1.0 - $W, 4)
+    $signalRows += [ordered]@{
+        name         = 'unknownEvidence'
+        value        = $unknownWeight
+        weight       = $unknownWeight
+        contribution = Round-Int (100.0 * (1.0 - $W) * $NEUTRAL_UNKNOWN)
+        available    = $true
     }
 }
 

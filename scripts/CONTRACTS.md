@@ -145,20 +145,41 @@ Stryker's own JSON plus agentQ semantic mutants merged into the same `files` map
 `agentq-N`, `mutatorName` prefixed `BusinessRule/`. Per-mutant `status`:
 Killed|Survived|NoCoverage|Timeout|Ignored|CompileError. Consumers: suppress
 `NoCoverage` from mutation findings (they are coverage gaps), report absolute
-survivors only.
+survivors only. A surviving `agentq-N` mutant may carry a `suggestedFix` (see
+`mutants.json` in `qa-mutation-author.md`) — a drafted, worktree-only edit that
+strengthens the covering test's assertion enough to kill it. This is the
+mutation level's equivalent of a generated scenario: a real "keep this?"
+candidate, not just a verbal recommendation. Mechanical (Stryker) survivors
+never carry one — qa-mutation-author only drafts fixes for mutants it designed
+itself, since it authored them before Stryker's own survivors are even known
+(Phase 5 ordering: business-rule tier runs first).
 
 ## scenarios/  (qa-scenario-writer)
 `scenarios/scenario-<AC>-<n>.json` — the framework-neutral IR:
 ```json
 {
-  "id": "EC-1234-AC3-1", "requirement": "AC-3", "level": "api" | "component" | "e2e",
+  "id": "EC-1234-AC3-1", "requirement": "AC-3", "level": "unit" | "component" | "api" | "e2e",
   "title": "Negative total is rejected",
   "given": "…", "when": "…", "then": "…",
   "http": { "method": "POST", "path": "/api/invoices", "body": {}, "expectStatus": 422, "expectBody": {} },
   "targetProject": "<projectPath from adapter-profiles>",
-  "renderedTo": ["worktree-relative path of generated test file"]
+  "renderedTo": ["worktree-relative path of generated test file"],
+  "executionState": "EXECUTED_PASSED" | "EXECUTED_FAILED" | "GENERATED_NOT_EXECUTED" | null,
+  "vacuityGrade": "verified_against_base" | "static_only" | null
 }
 ```
+`level: "unit"` is for a scenario that calls a function/module directly with no
+render, no DB, no HTTP — e.g. asserting an invariant on a pure helper's return
+value (verified case: a column-header-uniqueness check with no React render
+involved). `component` implies rendering/DOM or a real internal collaborator;
+don't use it just because the target file lives under a "components/" folder.
+
+`executionState`/`vacuityGrade` are absent (`null`) when qa-scenario-writer first
+writes the file — it doesn't know the outcome yet. The **orchestrator** fills them
+in after Phase 7 actually runs the scenario and (when consented) the anti-vacuity
+flip-to-base check, the same way it appends to `time-ledger.json`. `risk-score.ps1`
+reads them (see `testToSourceBalance` below) — never invent a value here to make a
+number look better; an untouched `null` correctly reads as "not yet executed."
 
 ## contract-report.json  (contract-check.ps1)
 ```json
@@ -183,6 +204,48 @@ survivors only.
   "topTests": [{ "fqn": "…", "reason": "unique cover of 6 changed lines", "runCommand": "…" }]
 }
 ```
+When signals are missing, `signals` also carries a synthetic `unknownEvidence` row
+(`available: true`, `value` = the fraction of total documented weight that's
+missing, `S: 0.35`) — see "Sparse-evidence dampening" below. Its `contribution`
+plus every available signal's `contribution` (computed from each signal's
+**original**, not renormalized, documented weight) sums to `score` — the ledger
+is a true breakdown, not decoration.
+
+### Sparse-evidence dampening (why the score can't be hijacked by one signal)
+Pure proportional renormalization — treat whatever signals ARE available as if
+they represented the full picture — has a real failure mode: with only, say, 14%
+of the total documented weight available, that 14% gets rescaled to 100%, and a
+single signal sitting at its worst possible value can drag the whole score to an
+extreme the missing 86% might have told a completely different story about.
+Verified live: a 3-line string-literal fix with a real, anti-vacuity-proven fix
+scored "Elevated" purely because `testToSourceBalance` (normally a 9% weight) was
+one of only two available signals. The fix: blend the renormalized weighted sum
+toward a neutral baseline, weighted by how much of the total documented weight is
+actually available (`W`) — `raw = W × (renormalized sum) + (1 − W) ×
+NEUTRAL_UNKNOWN`. Full signal coverage (`W = 1`) reduces to the plain weighted
+sum, unchanged. Sparse coverage pulls the score toward the baseline instead of
+amplifying whatever little evidence exists — missing evidence still shows up as
+lower `confidence`, never as a manufactured extreme in either direction.
+
+`NEUTRAL_UNKNOWN = 0.35`, not a dead-neutral `0.5` — verified live that this
+matters: the band table isn't symmetric around the midpoint (Low 0-20 | Moderate
+21-45 | Elevated 46-70 | High 71-100), so a coin-flip default for *total absence
+of evidence* lands at score 50 — Elevated by construction, the same band as
+genuine risk evidence. "We know nothing about this diff" and "we have evidence
+this diff is risky" must never read as the same verdict. `0.35` puts a
+100%-unknown case (`W = 0`) comfortably inside Moderate instead.
+
+### testToSourceBalance and generated scenarios
+This signal reads `diff-set.json`'s own test-vs-source line counts, but a
+developer's diff having zero test-line changes isn't the whole truth when
+agentQ's own Phase 7 generated and **verified** a scenario closing exactly that
+gap. `risk-score.ps1` also reads every `scenarios/*.json` in the workspace: each
+one with `executionState: "EXECUTED_PASSED"` and `vacuityGrade:
+"verified_against_base"` earns a 0.5 credit against the signal's worst-case value
+(two such scenarios fully offset it) — a `mutation-report.json` survivor with a
+`suggestedFix` counts the same way. A scenario that's merely `GENERATED_NOT_EXECUTED`
+or `static_only` earns no credit — only proven-non-vacuous evidence moves this
+number.
 
 ## time-ledger.json  (orchestrator appends per phase)
 ```json

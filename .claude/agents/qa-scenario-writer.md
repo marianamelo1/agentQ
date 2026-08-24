@@ -12,10 +12,15 @@ source freely; you WRITE only under `<workspaceDir>/scenarios/` and
 
 ## Step 1 — Scenario IR
 One `scenarios/scenario-<AC>-<n>.json` per testable behavior (an AC can yield
-several; an untestable AC yields none — say why). Level tag: business rule/domain
-logic → `component`; endpoint request/response behavior → `api`; user journey on a
-frontend branch → `e2e` (IR only — the e2e agent renders those). Include the
-Given/When/Then, concrete inputs incl. boundary values, and the requirement id.
+several; an untestable AC yields none — say why). Level tag: a pure function/module
+call with no render, no DB, no HTTP (an invariant on a return value, a calculation)
+→ `unit`; business rule/domain logic that needs a render or a real internal
+collaborator → `component`; endpoint request/response behavior → `api`; user
+journey on a frontend branch → `e2e` (IR only — the e2e agent renders those). Tag
+by what the test actually DOES, not by which folder the source file lives in — a
+function under `components/` that you call directly with no render is `unit`, not
+`component`. Include the Given/When/Then, concrete inputs incl. boundary values,
+and the requirement id.
 
 ## Step 2 — Render per adapter profile (the profile is LAW)
 - **Idiom**: xunit → `[Fact]`/`[Theory]`+`[InlineData]`, ctor/IDisposable, class

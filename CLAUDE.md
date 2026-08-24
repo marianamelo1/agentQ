@@ -270,7 +270,12 @@ via `git apply`, untracked files copied in).
    where mechanical mutants all die or none applies). All injected at once behind
    `AGENTQ_MUTANT` env-var switches (a `const` is promoted to a static property in
    the worktree copy), **one** build, then
-   `scripts/semantic-mutant-driver.ps1` runs one filtered test pass per id.
+   `scripts/semantic-mutant-driver.ps1` runs one filtered test pass per id. For
+   each of its OWN mutants that survives, qa-mutation-author drafts a concrete
+   strengthened-assertion edit to the covering test (worktree-only) — a real
+   "keep this?" candidate in the report, not just a verbal recommendation.
+   Stryker's mechanical survivors (found after this tier runs) never get one —
+   they stay a verbal recommendation.
 2. **Stryker mechanical tier**: `scripts/stryker-run.ps1` — pinned local tool,
    **never `--since`** (verified broken for this use); `-m` globs on changed files
    minus changed-but-uncovered regions, `{start..end}` char-span hunks (padded,

@@ -53,10 +53,19 @@ a number that isn't there.
    failures. The block always closes with "no signal ≠ not affected".
 5. **Per-level detail** — findings from the analyst brief using its exact
    evidence-qualified vocabulary (AC claims, scenario states, gap lattice tiers,
-   contract phrasing, the three test lists). Generated tests table: scenario, path,
-   state (`EXECUTED — PASSED/FAILED` / `GENERATED, COMPILES, NOT EXECUTED — <reason>
-   — run: <command>`), vacuity grade (`verified against base` / `static only`),
-   keep-candidate?
+   contract phrasing, the three test lists). Whichever of Unit/Mutation/Component/
+   API sections has a matching generated scenario (or, for Mutation, a survivor
+   carrying a `suggestedFix`) ends with a one-line pointer: `🧪 Generated: <id> —
+   <title>. See 'Keep this generated test?' below.` — one line per scenario, omitted
+   entirely when that level generated nothing. E2E only gets this pointer for a
+   scenario that actually ran this session (cached), never one still authoring in
+   the background. Then the **Generated scenarios** table, ALWAYS rendered even
+   with zero rows ("No scenarios generated this run." replaces the table when
+   empty): columns Level (unit/mutation/component/api/e2e) / Scenario / Path /
+   State (`EXECUTED — PASSED/FAILED` / `GENERATED, COMPILES, NOT EXECUTED —
+   <reason> — run: <command>`) / Vacuity grade (`verified against base` /
+   `static only`) / Keep-candidate?, sorted Unit → Mutation → Component → API →
+   E2E to match the section order above.
 6. **Socratic questions** — the analyst's list, verbatim.
 7. **Full evidence** (collapsed `<details>`) — risk-score signal ledger with weights
    and contributions, renormalization note, methodology one-liner ("heuristic scored
@@ -74,6 +83,8 @@ a number that isn't there.
   failing scenario) — impact candidates alone never make a headline item.
 - E2E authoring still in background → its row says
   `PENDING — authoring in background; next run includes it`.
-- End the file with the keep-these-tests question block the orchestrator will relay:
-  the list of keep-candidates with paths and one-line rationale.
+- End the file with the "Keep this generated test?" question block the
+  orchestrator will relay: the list of keep-candidates, each tagged `[level]`,
+  with paths and one-line rationale — same rows, same order as the Generated
+  scenarios table.
 - Your final message: the verdict block verbatim + the report path. Nothing else.

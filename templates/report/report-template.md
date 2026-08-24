@@ -78,7 +78,10 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
      diff-coverage.json has refused:true — state the refusal reason, no number.
      Test lists: three named lists ONLY — "most likely to catch a regression
      here" / "flaky-risk smells (static)" / "observed flaky (flipped across
-     runs)". Never the word "riskiest". -->
+     runs)". Never the word "riskiest".
+     If any scenarios/*.json this run is level:"unit", end this section with:
+     "🧪 Generated: `{{id}}` — {{title}}. See 'Keep this generated test?' below."
+     (one line per unit-level scenario). Omit the line entirely if none. -->
 
 {{unit findings}}
 
@@ -87,7 +90,13 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
 <!-- From mutation-report.json. Absolute survivors only, phrased as consequence:
      "a wrong {{X}} would ship — N tests covering {{file}} still pass when
      {{mutation}}". Suppress NoCoverage mutants (they are coverage findings and
-     belong in the Unit section). Name the assert to strengthen when known. -->
+     belong in the Unit section). Name the assert to strengthen when known.
+     If a surviving agentq-N mutant carries a suggestedFix, end that finding
+     with: "🧪 Generated fix: strengthens `{{testFile}}`. See 'Keep this
+     generated test?' below." A survivor with no suggestedFix (including every
+     Stryker mechanical survivor) just keeps the verbal "→ strengthen the
+     assert in X" recommendation — don't imply a diff exists when none was
+     drafted. -->
 
 {{mutation findings}}
 
@@ -100,7 +109,10 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
      AC claims carry their evidence source:
      MET — verified by executed scenario X (failed on base) ≠
      MET — verified (vacuity: static only) ≠ APPEARS MET — static reading only ≠
-     NOT MET — <observed vs expected> ≠ UNVERIFIABLE — <reason>. -->
+     NOT MET — <observed vs expected> ≠ UNVERIFIABLE — <reason>.
+     If any scenarios/*.json this run is level:"component", end this section
+     with one "🧪 Generated: `{{id}}` — {{title}}. See 'Keep this generated
+     test?' below." line per scenario. Omit if none. -->
 
 {{component findings + AC claims}}
 
@@ -111,7 +123,10 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
              any consumer relying on this shape will break"
      WARN → "potentially breaking — needs human judgment"
      Only Pact findings may name a consumer. Unknown provider states are
-     "unverifiable, not failed". -->
+     "unverifiable, not failed".
+     If any scenarios/*.json this run is level:"api", end this section with one
+     "🧪 Generated: `{{id}}` — {{title}}. See 'Keep this generated test?' below."
+     line per scenario. Omit if none. -->
 
 {{api + contract findings + AC claims}}
 
@@ -120,19 +135,34 @@ Merge risk: **{{band}}** · confidence: **{{confidence}}** — {{missing-signal 
 <!-- Cached-spec results only; new authoring is PENDING (see matrix).
      Design conformance findings: "DEVIATES — objective" (side-by-side evidence
      in the sibling evidence dir) vs "NEEDS HUMAN JUDGMENT" — never asserted as
-     a defect. Scoped to the linked frames only. -->
+     a defect. Scoped to the linked frames only.
+     If any CACHED level:"e2e" scenario ran this session (not one still PENDING
+     in the background — those are relayed as a later addendum, never claimed
+     here), end this section with one "🧪 Generated: `{{id}}` — {{title}}. See
+     'Keep this generated test?' below." line per scenario. Omit if none. -->
 
 {{e2e + design findings}}
 
-## Generated tests
+## Generated scenarios
 
-<!-- One row per rendered scenario (scenarios/*.json → renderedTo). Vacuity
-     grade: "verified against base" (the test FAILED on the base build — the
-     real guarantee) vs "static only" (not yet proven non-vacuous). -->
+<!-- ALWAYS render this table, even with zero rows this run — an omitted
+     section reads as "nothing was generated," which the developer can't
+     distinguish from "this section was forgotten." Empty → the single line
+     "No scenarios generated this run." replaces the table.
+     One row per: (a) scenarios/*.json → renderedTo (level = its own "level"
+     field: unit/component/api/e2e — never invent a value outside that set),
+     and (b) any mutants.json entry carrying a suggestedFix (level = "mutation",
+     path = suggestedFix.testFile). Sort by level in the order Unit, Mutation,
+     Component, API, E2E so it reads top-to-bottom the same way the sections
+     above do. Vacuity grade: "verified against base" (the test FAILED on the
+     base build — the real guarantee) vs "static only" (not yet proven
+     non-vacuous) — a mutation suggestedFix is "verified against base" once the
+     semantic-mutant-driver confirms the strengthened assertion actually kills
+     the mutant, "static only" otherwise. -->
 
-| Scenario | Path | State | Vacuity grade | Keep? |
-|---|---|---|---|---|
-| {{id}} — {{title}} | `{{worktree-relative path}}` | {{scenario state}} | {{verified against base \| static only}} | {{candidate \| no — why}} |
+| Level | Scenario | Path | State | Vacuity grade | Keep? |
+|---|---|---|---|---|---|
+| {{unit\|mutation\|component\|api\|e2e}} | {{id}} — {{title}} | `{{worktree-relative path}}` | {{scenario state}} | {{verified against base \| static only}} | {{candidate \| no — why}} |
 
 ## Questions worth answering before the PR
 
@@ -189,13 +219,16 @@ Base: {{base}} · Rev: {{rev}} · Route: `{{route}}` · Mode: {{mode}}
 
 <!-- KEEP-THESE-TESTS BLOCK — the orchestrator relays this question to the
      developer. List only keep-candidates (compiling, non-vacuous where
-     verifiable, placement-legal per the adapter profile). On explicit yes, the
+     verifiable, placement-legal per the adapter profile) — same rows as the
+     Generated scenarios table above, same order (Unit, Mutation, Component,
+     API, E2E). A mutation-level entry applies suggestedFix.before/after as an
+     edit to the existing test file, not a new file. On explicit yes, the
      orchestrator applies them to the product repo as a reviewed diff — never
      silently. -->
 
-**Keep any of these tests?** They currently live only in agentQ's worktree; nothing touches your repo until you say yes and review the diff.
+**Keep this generated test?** They currently live only in agentQ's worktree; nothing touches your repo until you say yes and review the diff.
 
-- `{{path}}` — {{one-line rationale, e.g. "covers AC-3's negative-total branch; failed on base"}}
+- **[{{level}}]** `{{path}}` — {{one-line rationale, e.g. "covers AC-3's negative-total branch; failed on base"}}
 - {{…}}
 
 Reply with the ones to keep (or "none") — placement follows the repo's test-placement rules.

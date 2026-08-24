@@ -54,6 +54,27 @@ SUT class name. Emit per-project filter expressions per the adapter profile
 } ] }
 ```
 Then `scripts/semantic-mutant-driver.ps1` builds once and runs each id; exit 0 =
-SURVIVED ("your tests would not catch X"), non-zero = KILLED. Your final message:
-the mutant list with the rule each one probes, plus anything you deliberately did
-not mutate and why.
+SURVIVED ("your tests would not catch X"), non-zero = KILLED.
+
+## Suggested fix for each of YOUR OWN survivors (not Stryker's)
+For every mutant of yours that SURVIVED, draft a minimal, concrete edit to the
+covering test — in the worktree, never the product repo — that strengthens its
+assertion enough to kill the mutant (e.g. assert the actual computed VAT amount,
+not just that the call succeeded). This is the mutation level's version of a
+generated scenario: a real "keep this?" candidate for the developer, not just a
+verbal "you should strengthen this" in the verdict block. Only draft one where
+you're confident it kills the mutant without weakening the test in any other way
+— if you can't find a clean fix, say so in your final message instead of forcing
+one. Add it to the matching mutant's entry in `mutants.json`:
+```json
+"suggestedFix": {
+  "testFile": "worktree-relative path", "rationale": "asserts the computed amount instead of just that the call succeeded",
+  "before": "…the exact lines being replaced…", "after": "…the strengthened replacement…"
+}
+```
+Mechanical (Stryker) survivors never get one from you — Stryker runs after your
+tier (Phase 5 ordering), so its survivors aren't known yet when you author; they
+stay a verbal recommendation in the verdict block, not a drafted fix.
+
+Your final message: the mutant list with the rule each one probes, which ones got
+a suggested fix and why, plus anything you deliberately did not mutate and why.
