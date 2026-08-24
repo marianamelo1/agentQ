@@ -22,27 +22,41 @@ The full workflow, safety rules, and phase-by-phase detail live in
      (point `productRepos` at your real local checkouts)
    - `.env.example` → `.env` (only needed for the E2E and Pact lanes; missing
      values degrade those lanes honestly, they never block the review)
-3. Set up the three MCPs (see **MCP setup** below) — Jira and Playwright are
-   pre-declared in [`.mcp.json`](.mcp.json) and need only two environment
-   variables; Figma is a one-time claude.ai connector.
-4. Check out the branch under review in the product repo (agentQ never clones,
-   pulls, or switches branches — it reviews what's there, including uncommitted
-   and untracked work).
-5. Say: **"Review my branch for EC-1234 in the payroll repo"**, `/qa-review payroll-poc`,
+3. Configure the MCPs — run `.\scripts\setup-mcp.ps1` once in your own
+   PowerShell terminal, then restart Claude Code and approve the MCP prompt
+   (see **MCP setup** below).
+4. Check out the branch under review in the product repo.
+5. For E2E tests (frontend branches only), have your local dev stack already
+   running. Other levels don't need this.
+6. Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
    or just **"Test my branch EC-8876"** — the repo name is optional; agentQ finds it
    by checking which registered repo has a matching branch checked out.
 
 ## MCP setup
 
-[`.mcp.json`](.mcp.json) already declares Jira and Playwright — approve them
-once when Claude Code prompts on first open.
+1. Clone `mcp-visma-jira` somewhere local, then run `.\scripts\setup-mcp.ps1`
+   in your own PowerShell terminal.
+   - `MCP_VISMA_JIRA_PATH` — path to your `mcp-visma-jira` checkout's `index.js`
+   - `JIRA_INTEGRATION_HUB_URL` — value is in that repo's own README
+   - `JIRA_PERSONAL_ACCESS_TOKEN` — Jira → Profile → Personal Access Tokens
+   - `TESTOMATIO_API_TOKEN` — optional, only used by the impact/Testomat lane
+2. Restart Claude Code — env vars only apply to new sessions — and approve
+   the MCP prompt. Verify with `/mcp`.
+3. **Playwright** needs no setup (zero-config). 
+4. Connect **Figma** via /mcp server and login with your visma account
 
-1. **Jira** — clone `mcp-visma-jira`, then set env vars `MCP_VISMA_JIRA_PATH`
-   (path to its `index.js`), `JIRA_INTEGRATION_HUB_URL` (value is in that
-   repo's own README), and `JIRA_PERSONAL_ACCESS_TOKEN` (Jira → Profile →
-   Personal Access Tokens).
-2. **Figma** — authorize once via claude.ai connector settings (frontend
-   branches only).
+Check status any time with `.\scripts\check-mcp.ps1` — statuses and scope of
+just this project's servers, plus whether the env vars are set (never their
+values).
+
+Entered a wrong value? `.\scripts\setup-mcp.ps1 -Reset <VAR_NAME>`, then
+re-run without `-Reset` to set it again.
+
+Jira behaving oddly? Two known traps: a server added with `claude mcp add` at
+user scope silently shadows `.mcp.json` — `claude mcp get jira` must say
+*Project config (shared via .mcp.json)*, otherwise `claude mcp remove jira -s
+user`. And since the setup script skips vars that are already set, stale values
+survive re-runs — fix them with `-Reset` as above.
 
 ## Command-line style invocation
 
@@ -59,7 +73,7 @@ plain language:
 
 ```
 /qa-review feature/EC-8876
-/qa-review EC-8876
+/qa-review EC-8876 - Add a new feature to payroll
 /qa-review --repo payroll-poc --branch feature/EC-8876
 /qa-review --worktree payroll-poc-EC-8876
 /qa-review --worktree <local-path>\payroll-poc-EC-8876
@@ -75,9 +89,12 @@ of every registered repo, not just the one path in `productRepos`. Give it a
 branch name, a ticket key, or the worktree's own directory name (e.g.
 `payroll-poc-EC-8876`) and it matches against whichever worktree that identifies —
 even if it's a `git worktree add` sibling that was never added to config. If more
-than one worktree matches (e.g. you have two feature branches checked out and
-gave no hint), it asks you which one. Not using worktrees at all works exactly the
-same way — there's just the one checkout to find.
+than one worktree matches — two feature branches checked out with no hint given,
+or a single ticket key that matches two branches (a ticket with a PR in two repos,
+or two candidate branches for the same ticket) — agentQ never guesses: it lists
+every match (repo, branch, path) and asks which one you mean. Add `--repo` or
+`--branch` if you already know which one and want to skip the question. Not using
+worktrees at all works exactly the same way — there's just the one checkout to find.
 
 ## What runs where
 
@@ -93,39 +110,18 @@ same way — there's just the one checkout to find.
 
 ## Consent moments
 
-Two per run, asked in chat (unless your config toggles say `always`/`never`):
+- Before mutation testing runs, agentQ tells you the scope and how long it'll take — your call to proceed.
+- Before running your code (including E2E), agentQ tells you exactly what it'll touch — like an external URL or database — so nothing happens without you knowing.
+- Say no to either, and the report just shows it as skipped.
+- For E2E, agentQ checks your dev server is already running and gives you the command to start it.
+- Set `always`/`never` in config if you'd rather skip being asked.
 
-1. **Mutation** — files in scope, estimated mutant count, time estimate.
-2. **Execution** — before any in-process app boot or E2E run, agentQ lists the
-   app's own outbound destinations found during intake (it cannot sandbox the
-   app's traffic, so consent must be informed). E2E additionally requires your
-   dev stack to already be running — agentQ health-checks and hands you the
-   start command, it never auto-starts it.
-
-A denied consent becomes a SKIPPED line in the report, never a silent hole.
 
 ## Honest reporting
 
-- A skipped or degraded check never reads as a pass — the capability matrix
-  shows exactly `RAN` / `DEGRADED — why` / `SKIPPED — why` per level.
-- Every acceptance-criterion claim carries its evidence source (executed
-  scenario vs static reading vs unverifiable).
-- Mutation findings are absolute survivors ("a wrong X would ship"), never a
-  percentage; diff coverage is always "coverage of the lines you changed",
-  never a global number.
-- The risk score is a labeled heuristic with its signal ledger below the fold —
-  never a "probability of passing CI". Missing signals lower the stated
-  confidence instead of vanishing.
+- Know in seconds if the branch is ready for a PR, and if not, what to fix first.
+- See real proof, not guesses — a tested claim looks different from a "looks fine" reading.
+- Never get fooled — if something wasn't checked, the report says so instead of hiding it.
+- Decide yourself whether to keep any test agentQ wrote — nothing is added without you saying yes.
+- Inside: a verdict, risk score, pass/fail per level, generated tests, and full evidence if you want to dig in.
 
-## One-time setup (offered on first run, never silent)
-
-- .NET SDK on PATH for .NET repos; Node matching the repo's `engines` for JS.
-- Per-repo, with your consent: local `dotnet-stryker` tool restore, a pinned
-  checksum-verified `oasdiff` binary into `tools/`, Playwright browsers
-  (frontend repos). Docker only if you consent to Testcontainers paths.
-
-## Roadmap (Phase 2 — not built yet)
-
-Plugin packaging (`/agentq:qa-review` from the internal marketplace) and
-headless CI mode posting results to the PR — same agents, skills, and scripts,
-different invocation shell.
