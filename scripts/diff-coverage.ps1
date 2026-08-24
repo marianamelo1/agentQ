@@ -186,7 +186,7 @@ foreach ($u in @(Get-Prop $diffSet 'untracked' @())) {
     $abs = $null
     foreach ($root in @($repoPath, $worktreeDir)) {
         if (-not [string]::IsNullOrWhiteSpace($root)) {
-            $cand = Join-Path $root (([string]$u) -replace '/', '\')
+            $cand = Join-Path $root ([string]$u)
             if (Test-Path -LiteralPath $cand -PathType Leaf) { $abs = $cand; break }
         }
     }

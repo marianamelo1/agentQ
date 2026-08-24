@@ -14,7 +14,7 @@ human-readable report under `reports/`.
 Invoke with something like: *"Review my branch for EC-1234 in the payroll repo"*,
 *"/qa-review payroll-poc"*, just *"Test my branch EC-8876"* with no repo named at
 all, or the explicit flag form `/qa-review --branch feature/EC-8876 --repo
-payroll-poc --worktree <local-path>\payroll-poc-EC-8876 --ticket EC-8876` — every one of
+payroll-poc --worktree <local-path>/payroll-poc-EC-8876 --ticket EC-8876` — every one of
 those four is optional and order-independent (`.claude/skills/qa-review/SKILL.md`
 Inputs). The repo/worktree doesn't need to be stated: since the branch under review
 must already be checked out locally (see Preconditions), agentQ finds it by scanning
@@ -119,7 +119,8 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 **Agents judge, scripts execute.** Six subagents in `.claude/agents/` do only
 judgment work (classification, analysis, test authoring, business-rule mutation
 design, design conformance, report synthesis). Eleven deterministic PowerShell scripts
-in `scripts/` do everything mechanical (git worktrees, running tests, parsing
+in `scripts/` do everything mechanical — cross-platform: Windows PowerShell 5.1+ or
+pwsh 7+ on macOS/Linux (from a bash/zsh shell, invoke as `pwsh scripts/<name>.ps1 …`) (git worktrees, running tests, parsing
 coverage, driving Stryker, contract diffs, the Jira ticket fetch, the risk formula,
 artifact rendering) —
 because the tool's credibility depends on the same branch producing the same verdict

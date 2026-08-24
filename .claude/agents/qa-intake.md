@@ -50,7 +50,7 @@ the orchestrator — dense facts, no prose padding.
 4. **Jira** — ticket key from the orchestrator, else regex the branch name then
    recent commit subjects (`[A-Z][A-Z0-9]+-\d+`); a pasted Jira URL
    (`…/browse/KEY`) works as-is — the script parses it. Run
-   `scripts/jira.ps1 -IssueIdOrKey <key> -OutPath <workspaceDir>\jira-ticket.json`
+   `scripts/jira.ps1 -IssueIdOrKey <key> -OutPath <workspaceDir>/jira-ticket.json`
    (direct REST `get_issue`, no MCP — shape in CONTRACTS.md), then read the
    artifact. `status: OK` → extract acceptance criteria (AC list verbatim,
    numbered) and Figma links anywhere in the ticket — the text is Jira **wiki
@@ -58,7 +58,7 @@ the orchestrator — dense facts, no prose padding.
    artifact's `figmaLinks` is a mechanical pre-scan to verify, not re-grep. If the
    ticket itself has no AC-relevant info (nothing criterion-shaped in description
    or comments) and the artifact carries a `parentKey` or `epicKey` → run the
-   script again on that key with `-OutPath <workspaceDir>\jira-ticket-parent.json`
+   script again on that key with `-OutPath <workspaceDir>/jira-ticket-parent.json`
    and extract from the parent instead, labeling the source in the brief ("ACs
    from parent EC-1200"). SKIPPED/DEGRADED status or no key → report the status
    string verbatim; the orchestrator will ask for

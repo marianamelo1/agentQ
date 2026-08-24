@@ -130,7 +130,7 @@ function Get-SeedsFromFile {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hunks
     )
     $seeds = New-Object System.Collections.Generic.List[object]
-    $full = Join-Path $RepoPath ($RelPath -replace '/', '\')
+    $full = Join-Path $RepoPath $RelPath
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return $seeds }  # deleted file
 
     # --- Ocelot route config: the file itself IS the API surface (CLAUDE.md) -- every
