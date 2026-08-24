@@ -16,21 +16,19 @@ The full workflow, safety rules, and phase-by-phase detail live in
 
 ## Quickstart
 
-1. Clone this repo and open it in Claude Code/CLi or Visual Studio with Claude.
+1. Clone this repo
 2. Copy the two example configs:
    - `.claude/qa-agent-config.example.jsonc` → `.claude/qa-agent-config.jsonc`
      (point `productRepos` at your real local checkouts)
-   - `.env.example` → `.env` (only needed for the E2E and Pact lanes; missing
-     values degrade those lanes honestly, they never block the review)
-3. Run `.\scripts\setup-mcp.ps1` once in your own PowerShell terminal.
+   - `.env.example` → `.env` (only needed for the E2E and Pact lanes)
+3. Open PowerShell, go to the project, and run `.\scripts\setup-mcp.ps1`.
    On macOS: `brew install --cask powershell` first, then
    `pwsh ./scripts/setup-mcp.ps1`.
-4. Restart Claude Code 
+4. Go to Claude Code/CLi or Visual Studio with Claude Code.
 5. Run `claude` and approve the MCP prompt
-5. Check out the branch under review in the product repo.
 6. For E2E tests (frontend branches only), have your local dev stack already
    running. Other levels don't need this.
-7. Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
+7. On Claude Code, Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
    or just **"Test my branch EC-8876"** — the repo name is optional; agentQ finds it
    by checking which registered repo has a matching branch checked out.
 
