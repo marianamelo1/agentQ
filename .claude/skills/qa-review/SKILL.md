@@ -150,12 +150,14 @@ intent, then map onto these four slots:
    `scripts/contract-check.ps1`. Frontend branches: run cached E2E specs
    (`npx playwright test --grep @agentq`); kick off `qa-e2e-author` in the
    background for new scenarios and (if a Figma link exists) design conformance.
-8. **Report** — delegate `qa-report-synthesizer` with the workspace dir (it renders
-   the Impact matrix row + the concise impact map from `impact-index.json` /
-   `testomat-candidates.json`). Save under
-   `reports/`, show the verdict block in chat, then ask which generated tests to
-   keep; on explicit yes apply them to the product repo as a reviewed diff
-   (placement per adapter profile).
+8. **Report** — delegate `qa-report-synthesizer` with the workspace dir. It
+   writes TWO files under `reports/`: the max-2-page plain-language main report
+   and its `-evidence.md` technical companion (which renders the Impact matrix
+   row + impact map from `impact-index.json` / `testomat-candidates.json`).
+   Re-save both as UTF-8 with BOM (PowerShell `[IO.File]::WriteAllText` with
+   `UTF8Encoding($true)`), show the main report's Result line + findings in
+   chat, then ask which generated tests to keep; on explicit yes apply them to
+   the product repo as a reviewed diff (placement per adapter profile).
 9. **Cleanup verify** — `scripts/worktree.ps1 -Verify`. Confirm product repo
    untouched.
 
