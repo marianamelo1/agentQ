@@ -56,4 +56,9 @@ foreach ($v in $vars) {
 }
 
 Write-Host ""
-Write-Host "Figma is a claude.ai connector, not tracked in .mcp.json - verify with /mcp (frontend branches only)."
+$figma = (& $claude mcp get 'claude.ai Figma' 2>&1) -join "`n"
+$figmaStatus = if ($figma -match 'Status:\s*(.+)') { $Matches[1].Trim() } else { 'not configured' }
+Write-Host ("{0,-12} {1,-45} {2}" -f 'figma', $figmaStatus, 'claude.ai connector')
+if ($figmaStatus -notmatch 'Connected') {
+    Write-Host "  [info] only needed for frontend branches with a linked design - connect with: claude mcp login `"claude.ai Figma`" (or re-run setup-mcp.ps1)" -ForegroundColor Yellow
+}

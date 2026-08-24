@@ -34,16 +34,16 @@ The full workflow, safety rules, and phase-by-phase detail live in
 
 ## MCP setup
 
-1. Clone `mcp-visma-jira` somewhere local, then run `.\scripts\setup-mcp.ps1`
-   in your own PowerShell terminal.
-   - `MCP_VISMA_JIRA_PATH` — path to your `mcp-visma-jira` checkout's `index.js`
-   - `JIRA_INTEGRATION_HUB_URL` — value is in that repo's own README
-   - `JIRA_PERSONAL_ACCESS_TOKEN` — Jira → Profile → Personal Access Tokens
-   - `TESTOMATIO_API_TOKEN` — optional, only used by the impact/Testomat lane
+1. Run `.\scripts\setup-mcp.ps1` in your own PowerShell terminal (not through
+   Claude Code — it prompts interactively). It does the whole thing: clones and
+   `npm install`s `mcp-visma-jira`, opens the token pages in your browser and
+   asks only for the two tokens (Testomat optional), and offers to connect the
+   **Figma** claude.ai connector — a browser login with your Visma account.
+   Values are persisted as User environment variables, never into any file,
+   and it ends with a status check.
 2. Restart Claude Code — env vars only apply to new sessions — and approve
-   the MCP prompt. Verify with `/mcp`.
-3. **Playwright** needs no setup (zero-config). 
-4. Connect **Figma** via /mcp server and login with your visma account
+   the MCP prompt (`⏸ Pending approval` in the status check is expected until
+   then). Verify with `/mcp`.
 
 Check status any time with `.\scripts\check-mcp.ps1` — statuses and scope of
 just this project's servers, plus whether the env vars are set (never their
