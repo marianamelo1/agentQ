@@ -37,11 +37,9 @@ The full workflow, safety rules, and phase-by-phase detail live in
 Entered a wrong value? `.\scripts\setup-mcp.ps1 -Reset <VAR_NAME>`, then
 re-run without `-Reset` to set it again.
 
-Where values persist: on Windows, User-scope environment variables; on macOS,
-`export` lines in your shell profile (`~/.zshrc`). Either way, restart Claude
-Code before it sees them. Check status any time with `.\scripts\check-mcp.ps1`
+ Check status any time with `.\scripts\check-mcp.ps1`
 (macOS: `pwsh ./scripts/check-mcp.ps1`) — tools, this project's MCP servers,
-env vars (never their values), a live Jira probe, and Figma.
+env vars, a live Jira probe, and Figma.
 
 ## Command-line style invocation
 
