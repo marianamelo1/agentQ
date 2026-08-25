@@ -137,6 +137,55 @@ function Test-BootsWebFactory {
     } catch { return $true }
 }
 
+function Find-NearestNuGetConfig {
+    # Mirrors NuGet's own directory walk-up (project dir -> ancestors, stopping at
+    # the repo root) so the fallback below only acts when normal `dotnet build`
+    # discovery would ALREADY fail  -  independent copy of run-tests.ps1's helper,
+    # per this codebase's self-contained-scripts convention.
+    param([Parameter(Mandatory = $true)][string]$StartDir, [Parameter(Mandatory = $true)][string]$CeilingDir)
+    $ceiling = ((Resolve-Path -LiteralPath $CeilingDir).Path).TrimEnd('\', '/')
+    $dir = $StartDir
+    while ($true) {
+        $hit = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^nuget\.config$' }) | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+        if ($dir.TrimEnd('\', '/') -ieq $ceiling) { break }
+        $parent = Split-Path -Parent $dir
+        if ([string]::IsNullOrEmpty($parent) -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    return $null
+}
+
+$script:nugetConfigOverrideCache = @{}
+function Get-RepoNuGetConfigOverride {
+    # WHY: verified live on payroll-poc  -  its private feed is declared in
+    # apps/backend/src/nuget.config, but a test project under apps/backend/tests/
+    # is a SIBLING of src/, not a descendant, so NuGet's own directory walk-up
+    # never finds it and restore falls back to nuget.org alone (NU1101 on an
+    # internal package). Only acts when the repo has exactly ONE such file, so
+    # this never guesses between competing configs.
+    param([Parameter(Mandatory = $true)][string]$ProjAbs, [Parameter(Mandatory = $true)][string]$RepoPath)
+    $cacheKey = "$RepoPath|$ProjAbs"
+    if ($script:nugetConfigOverrideCache.ContainsKey($cacheKey)) { return $script:nugetConfigOverrideCache[$cacheKey] }
+    $projDir = Split-Path -Parent $ProjAbs
+    $result = $null
+    if (-not (Find-NearestNuGetConfig -StartDir $projDir -CeilingDir $RepoPath)) {
+        $seen = @{}
+        $all = New-Object System.Collections.Generic.List[string]
+        foreach ($pattern in @('nuget.config', 'NuGet.Config')) {
+            foreach ($f in [System.IO.Directory]::EnumerateFiles($RepoPath, $pattern, [System.IO.SearchOption]::AllDirectories)) {
+                if ($f -match '[\\/](bin|obj|node_modules|\.git)[\\/]') { continue }
+                $key = $f.ToLowerInvariant()
+                if (-not $seen.ContainsKey($key)) { $seen[$key] = $true; $all.Add($f) }
+            }
+        }
+        if ($all.Count -eq 1) { $result = $all[0] }
+    }
+    $script:nugetConfigOverrideCache[$cacheKey] = $result
+    return $result
+}
+
 # vstest's wording when a --filter matches nothing (TreatNoTestsAsError makes
 # this a non-zero exit, so text is how we tell "zero match" from "tests failed").
 $ZeroMatchPattern = 'No test matches the given testcase filter|No test is available'
@@ -216,6 +265,7 @@ $buildFailed = @{}
 
 foreach ($proj in $distinctProjects) {
     Write-Verbose "Building $proj"
+    $nugetConfigOverride = Get-RepoNuGetConfigOverride -ProjAbs $proj -RepoPath $worktreeDir
     $res = Invoke-Dotnet -ArgumentList @('build', $proj, '-c', 'Debug', '--no-restore') -WorkingDirectory $worktreeDir
     $logName = 'build-' + ([System.IO.Path]::GetFileNameWithoutExtension($proj) -replace '[^\w\-\.]', '_') + '.log'
 
@@ -226,9 +276,14 @@ foreach ($proj in $distinctProjects) {
     # the mutant). --no-restore only exists to keep the WARM-worktree path fast;
     # dropping it once, only on this specific signature, restores the missing
     # assets and lets the real build result (mutant compiles or not) come through.
+    # A repo whose private feed's nuget.config isn't discoverable via directory
+    # walk-up from $proj (verified live: payroll-poc  -  see Get-RepoNuGetConfigOverride)
+    # gets it passed explicitly so this restore doesn't NU1101 on an internal package.
     if ($res.ExitCode -ne 0 -and $res.Output -match 'NETSDK1004') {
         Write-Utf8NoBom -Path (Join-Path $evidenceDir "$logName.pre-restore") -Content $res.Output
-        $res = Invoke-Dotnet -ArgumentList @('build', $proj, '-c', 'Debug') -WorkingDirectory $worktreeDir
+        $retryArgs = @('build', $proj, '-c', 'Debug')
+        if ($nugetConfigOverride) { $retryArgs += @('--configfile', $nugetConfigOverride) }
+        $res = Invoke-Dotnet -ArgumentList $retryArgs -WorkingDirectory $worktreeDir
     }
 
     Write-Utf8NoBom -Path (Join-Path $evidenceDir $logName) -Content $res.Output
