@@ -823,7 +823,20 @@ try {
     $strykerExePath = ''
     if ($plannedRuns.Count -gt 0) {
         $toolLogBase = Join-Path $logsDir 'tool'
-        $toolsManifestPath = Join-Path (Join-Path $worktreeDir '.config') 'dotnet-tools.json'
+        # WHY check both locations: dotnet's OWN manifest autodetection (both
+        # `dotnet tool restore` and later invoking the installed command, e.g.
+        # `dotnet stryker`) only ever walks up looking for .config/dotnet-tools.json
+        # -- the pre-3.0-SDK convention of a bare ./dotnet-tools.json at the repo
+        # root (e-conomic commits this form) is invisible to it. Missing that meant
+        # a repo pinning Stryker at the root silently lost its pin to our shared
+        # tools\stryker install instead of "a repo's own committed tool-manifest
+        # pin wins" holding as documented.
+        $dotConfigManifestPath = Join-Path (Join-Path $worktreeDir '.config') 'dotnet-tools.json'
+        $toolsManifestPath = $dotConfigManifestPath
+        if (-not (Test-Path -LiteralPath $toolsManifestPath)) {
+            $rootManifestPath = Join-Path $worktreeDir 'dotnet-tools.json'
+            if (Test-Path -LiteralPath $rootManifestPath) { $toolsManifestPath = $rootManifestPath }
+        }
         $repoPinsStryker = $false
         if (Test-Path -LiteralPath $toolsManifestPath) {
             $tm = Read-JsonFile -Path $toolsManifestPath
@@ -831,6 +844,16 @@ try {
             if ($null -ne $tools -and $null -ne (Get-Prop $tools 'dotnet-stryker')) { $repoPinsStryker = $true }
         }
         if ($repoPinsStryker) {
+            if ($toolsManifestPath -ne $dotConfigManifestPath) {
+                # Mirror the root-form manifest into .config/ (worktree-only copy,
+                # never the product repo) so both `dotnet tool restore` below and
+                # the later `dotnet stryker` invocation -- which has no
+                # --tool-manifest equivalent of its own -- resolve it the normal
+                # way instead of needing bespoke path plumbing at every call site.
+                $dotConfigDir = Split-Path -Parent $dotConfigManifestPath
+                if (-not (Test-Path -LiteralPath $dotConfigDir)) { New-Item -ItemType Directory -Force -Path $dotConfigDir | Out-Null }
+                Copy-Item -LiteralPath $toolsManifestPath -Destination $dotConfigManifestPath -Force
+            }
             $r = Invoke-Native -FilePath 'dotnet' -Arguments 'tool restore' `
                 -WorkingDirectory $worktreeDir -LogBase "$toolLogBase-restore" -TimeoutMs $timeoutMs
             if ($r.TimedOut -or $r.ExitCode -ne 0) {

@@ -197,10 +197,17 @@ function Install-Oasdiff {
         [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
     # Release asset per platform. Windows stays amd64 (x64 emulation covers ARM
-    # Windows); macOS/Linux pick the real architecture (Apple Silicon = arm64).
+    # Windows); Linux picks the real architecture (Apple Silicon equivalents on
+    # Linux are rare but arm64 exists). macOS ships ONE universal asset
+    # (verified against the real v1.29.1 release: `oasdiff_<ver>_darwin_all.tar.gz`
+    # -- there is no per-arch darwin_amd64/darwin_arm64 build, so guessing an
+    # arch suffix there 404s on every Mac, Apple Silicon or Intel).
     $osPart = if ($script:IsWin) { 'windows' } elseif ($script:IsMac) { 'darwin' } else { 'linux' }
     $archPart = 'amd64'
-    if (-not $script:IsWin) {
+    if ($script:IsMac) {
+        $archPart = 'all'
+    }
+    elseif (-not $script:IsWin) {
         try {
             if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq `
                 [System.Runtime.InteropServices.Architecture]::Arm64) { $archPart = 'arm64' }
