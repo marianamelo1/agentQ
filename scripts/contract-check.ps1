@@ -6,10 +6,14 @@
 .DESCRIPTION
     Modes:
       schema-diff  -- diff two OpenAPI documents with the pinned oasdiff binary.
-                     With -SpecPath: committed-spec shortcut (working tree vs
-                     `git show <baseSha>:<SpecPath>`). Otherwise -BaseSpec/-RevSpec
-                     point at boot-captured documents produced by the orchestrator
-                     or test fixtures -- this script never boots the app itself.
+                     Committed-spec path (the default): working tree vs
+                     `git show <baseSha>:<path>` per spec  -  the path(s) come from
+                     -SpecPath when given, otherwise auto-derived from the
+                     workspace's diff-set.json (changed/untracked openapi*/swagger*
+                     files; several specs are each diffed and merged; none changed
+                     -> honest skip). With -BaseSpec/-RevSpec: boot-captured
+                     documents produced by the orchestrator or test fixtures --
+                     this script never boots the app itself.
       ocelot-diff  -- ApiGateway: its API surface IS its Ocelot route config, so the
                      contract diff is a structural JSON diff of changed
                      *.ocelot.json files (base = git show, rev = working tree).
@@ -390,39 +394,9 @@ try {
         # user consent) long before this point.
         Install-Oasdiff | Out-Null
 
-        $diff = $null
-        if ($SpecPath) {
-            # Committed-spec shortcut. WHY: the working-tree file captures
-            # uncommitted spec edits on the rev side; `git show <baseSha>:<path>`
-            # is the exact merge-base contract on the base side; zero app boots.
-            if (-not $repoPath -or -not $baseSha) { throw "manifest is missing repoPath/baseSha (required for -SpecPath)" }
-            $specGit = $SpecPath -replace '\\', '/'
-            $revFile = Join-Path $repoPath $SpecPath
-            if (-not (Test-Path -LiteralPath $revFile)) {
-                $skipped    = $true
-                $skipReason = "working-tree spec missing at $revFile -- nothing to diff on the rev side"
-            } else {
-                # Keep the original extension: oasdiff uses it to pick the
-                # JSON/YAML loader.
-                $ext = [System.IO.Path]::GetExtension($SpecPath)
-                if ([string]::IsNullOrEmpty($ext)) { $ext = '.json' }
-                $baseFile = Join-Path $script:TempDir ("base-spec$ext")
-                $git = Invoke-Native -Exe 'git' -Arguments @('-C', $repoPath, 'show', "$($baseSha):$specGit") -StdOutFile $baseFile
-                if ($git.ExitCode -ne 0) {
-                    # A spec that did not exist at the merge base has no baseline
-                    # contract; skipping (not "0 breaking") keeps the claim honest.
-                    $skipped    = $true
-                    $skipReason = "spec $specGit does not exist at base SHA $baseSha -- no baseline contract to diff against"
-                } else {
-                    $prov.base  = 'committed-spec'
-                    $prov.rev   = 'committed-spec'
-                    $prov.route = $specGit   # repo-relative origin of the document
-                    $diff = Invoke-OasdiffDiff -BaseFile $baseFile -RevFile $revFile
-                }
-            }
-        } else {
+        if ($BaseSpec -or $RevSpec) {
             if (-not $BaseSpec -or -not $RevSpec) {
-                throw 'schema-diff requires either -SpecPath (committed-spec shortcut) or both -BaseSpec and -RevSpec (boot-captured docs)'
+                throw 'schema-diff with boot-captured docs requires BOTH -BaseSpec and -RevSpec'
             }
             if (-not (Test-Path -LiteralPath $BaseSpec)) { throw "base spec not found: $BaseSpec" }
             if (-not (Test-Path -LiteralPath $RevSpec))  { throw "rev spec not found: $RevSpec" }
@@ -433,15 +407,105 @@ try {
             # never a guess.
             $prov.route = $null
             $diff = Invoke-OasdiffDiff -BaseFile $BaseSpec -RevFile $RevSpec
-        }
-
-        if ($null -ne $diff) {
             $breaking   = $diff.breaking
             $warnings   = $diff.warnings
             $info       = $diff.info
             $skipped    = $diff.skipped
             $skipReason = $diff.skipReason
         }
+        else {
+            # Committed-spec shortcut. WHY: the working-tree file captures
+            # uncommitted spec edits on the rev side; `git show <baseSha>:<path>`
+            # is the exact merge-base contract on the base side; zero app boots.
+            # -SpecPath is optional: without it the changed spec file(s) are
+            # auto-derived from diff-set.json (files UNION untracked)  -  verified
+            # live: requiring the caller to hunt the path added a failed call +
+            # a manual grep to every run for information the diff already holds.
+            if (-not $repoPath -or -not $baseSha) { throw "manifest is missing repoPath/baseSha (required for the committed-spec path)" }
+            $specRx = '(?i)(^|/)(openapi|swagger)[^/]*\.(json|yaml|yml)$'
+            $specPaths = @()
+            if ($SpecPath) {
+                $specPaths = @($SpecPath)
+            }
+            else {
+                $diffSet = $null
+                $diffSetPath = Join-Path $workspaceDir 'diff-set.json'
+                if (Test-Path -LiteralPath $diffSetPath) {
+                    $diffSet = Get-Content -LiteralPath $diffSetPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                }
+                $found = @()
+                if ($null -ne $diffSet) {
+                    foreach ($f in @(Get-Prop $diffSet 'files' @())) {
+                        if ([string](Get-Prop $f 'status' '') -eq 'D') { continue }
+                        $p = ([string](Get-Prop $f 'path' '')) -replace '\\', '/'
+                        if ($p -match $specRx) { $found += $p }
+                    }
+                    foreach ($u in @(Get-Prop $diffSet 'untracked' @())) {
+                        $p = ([string]$u) -replace '\\', '/'
+                        if ($p -match $specRx) { $found += $p }
+                    }
+                }
+                # Sorted for byte-stable artifacts (same branch, same report, twice).
+                $specPaths = @($found | Sort-Object -Unique)
+            }
+
+            if ($specPaths.Count -eq 0) {
+                # An unchanged committed spec means an unchanged documented
+                # contract on this capture path  -  honest skip, never "0 breaking".
+                $skipped    = $true
+                $skipReason = 'no committed OpenAPI spec changed in this diff (auto-detected from diff-set.json) -- nothing to diff on the committed-spec path; pass -SpecPath or -BaseSpec/-RevSpec to override'
+            }
+            else {
+                $prov.base  = 'committed-spec'
+                $prov.rev   = 'committed-spec'
+                $prov.route = (@($specPaths | ForEach-Object { $_ -replace '\\', '/' }) -join '; ')
+                $specSkipNotes = @()
+                $ranAny = $false
+                $specIdx = 0
+                foreach ($sp in $specPaths) {
+                    $specIdx++
+                    $specGit = $sp -replace '\\', '/'
+                    $revFile = Join-Path $repoPath $sp
+                    if (-not (Test-Path -LiteralPath $revFile)) {
+                        $specSkipNotes += "working-tree spec missing at $revFile -- nothing to diff on the rev side"
+                        continue
+                    }
+                    # Keep the original extension: oasdiff uses it to pick the
+                    # JSON/YAML loader.
+                    $ext = [System.IO.Path]::GetExtension($sp)
+                    if ([string]::IsNullOrEmpty($ext)) { $ext = '.json' }
+                    $baseFile = Join-Path $script:TempDir ("base-spec-$specIdx$ext")
+                    $git = Invoke-Native -Exe 'git' -Arguments @('-C', $repoPath, 'show', "$($baseSha):$specGit") -StdOutFile $baseFile
+                    if ($git.ExitCode -ne 0) {
+                        # A spec that did not exist at the merge base has no baseline
+                        # contract; skipping (not "0 breaking") keeps the claim honest.
+                        $specSkipNotes += "spec $specGit does not exist at base SHA $baseSha -- no baseline contract to diff against"
+                        continue
+                    }
+                    $diff = Invoke-OasdiffDiff -BaseFile $baseFile -RevFile $revFile
+                    if ($diff.skipped) {
+                        $specSkipNotes += "$specGit`: $($diff.skipReason)"
+                        continue
+                    }
+                    $ranAny = $true
+                    $breaking += @($diff.breaking)
+                    $warnings += @($diff.warnings)
+                    $info     += @($diff.info)
+                }
+                if (-not $ranAny) {
+                    $skipped    = $true
+                    $skipReason = ($specSkipNotes -join ' | ')
+                }
+                else {
+                    # Some specs diffed, some couldn't: the artifact must carry both
+                    # truths  -  the diff results AND the per-spec skip reasons.
+                    foreach ($n in $specSkipNotes) {
+                        $info += , [ordered]@{ ruleId = 'spec-skipped'; level = 'INFO'; text = $n; path = $null }
+                    }
+                }
+            }
+        }
+
         $summary = "contract-check: schema-diff breaking=$($breaking.Count) warnings=$($warnings.Count) info=$($info.Count) skipped=$skipped -> $artifactPath"
         if ($skipped) { $summary = "contract-check: schema-diff SKIPPED ($skipReason) -> $artifactPath" }
     }

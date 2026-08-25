@@ -1,6 +1,6 @@
 ---
 name: qa-review
-description: Shift-left QA review of a product-repo feature branch before it becomes a PR — unit/mutation/component/API(+contract) levels, plus E2E and Figma design conformance on frontend branches. Usage - /qa-review [--branch <name-or-fragment>] [--repo <slug-or-fragment>] [--worktree <path-or-name>] [--ticket <KEY>], all optional, order-independent, and combinable with plain natural language ("test my branch EC-8876") or a bare branch name with no flags at all. The repo/worktree is auto-detected from whichever registered checkout (including a developer's own `git worktree add` siblings) has a matching branch checked out. Reviews the branch currently checked out in the configured local clone, including uncommitted and untracked work.
+description: Shift-left QA review of a product-repo feature branch before it becomes a PR — unit/mutation/component/API(+contract) levels, plus E2E and Figma design conformance on frontend branches. Usage - /qa-review [--branch <name-or-fragment>] [--repo <slug-or-fragment>] [--worktree <path-or-name>] [--ticket <KEY>] [--quick], all optional, order-independent, and combinable with plain natural language ("test my branch EC-8876") or a bare branch name with no flags at all. --quick = static lanes only (intake, committed-spec contract diff, impact, analysis, report — no test execution, no mutation), every execution-dependent claim honestly graded. The repo/worktree is auto-detected from whichever registered checkout (including a developer's own `git worktree add` siblings) has a matching branch checked out. Reviews the branch currently checked out in the configured local clone, including uncommitted and untracked work.
 ---
 
 # /qa-review — orchestration
@@ -38,6 +38,13 @@ intent, then map onto these four slots:
   (or worktree of it) has a non-default branch checked out.
 - Ticket key, if not otherwise given, is still extracted from the branch/commits by
   `qa-intake` in step 2 — `--ticket` only short-circuits that extraction.
+- **`--quick`** (or plain language: "quick review", "static only") — run steps
+  1–2c + the committed-spec contract diff + `qa-analyst` + the report ONLY: no
+  unit execution, no mutation, no generated-test execution. Every
+  execution-dependent claim is graded honestly (`APPEARS MET — static reading
+  only`; the 🔍 table's unit/mutation/execution rows read `SKIPPED — quick mode`,
+  never a pass), the report header names the mode, and both consent gates are
+  skipped as `SKIPPED — quick mode`. Offer the full run as the follow-up.
 
 ## Run loop
 
@@ -75,6 +82,20 @@ intent, then map onto these four slots:
    If no ticket/AC source (or the Jira lane is SKIPPED/DEGRADED with nothing
    pasted) → ask the user to paste ACs or continue with
    AC-alignment UNVERIFIABLE.
+   **Contract lane, committed-spec/ocelot capture paths only**: when intake's
+   contract gate opens and the capture path needs no boot, run
+   `scripts/contract-check.ps1 -Manifest <path>` NOW (spec paths auto-derived
+   from diff-set.json; ApiGateway → `-Mode ocelot-diff`) — pure git + oasdiff,
+   no consent needed, and the risk score gets its contract signal on the first
+   computation. The boot-capture path (payroll-poc) and Pact stay in step 7.
+   **💬 Combined consent (immediately after intake, one message)**: ask BOTH
+   gates now per their toggles — mutation (scope, calibrated mutant/time
+   estimate; your nothing-worth-mutating auto-skip judgment still applies first)
+   and execution (disclose intake's outbound destinations verbatim). Remember
+   the answers; apply them when steps 5/7 arrive. WHY: the developer's answer
+   latency then overlaps steps 2b–4's machine work instead of serializing
+   between phases. `--quick` → skip the question entirely, record both gates
+   `SKIPPED — quick mode`.
 2b. **Impact (gated by `toggles.skipQaImpact`, never blocking)** —
    `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>` runs whenever
    `skipQaImpact` is `false` OR step 2c's `skipManualTestAnalysis` is `false` (the
@@ -105,17 +126,42 @@ intent, then map onto these four slots:
    with `status: "SKIPPED — Testomatio MCP not configured"`. Stream one line
    ("Manual testing: 2 candidates — see report"). Overlaps step 3; a failure here
    degrades this lane only.
-3. **Unit + flaky** — issue `scripts/run-tests.ps1 -Manifest <path>` (chained into
+3. **Unit** (skipped under `--quick`) — issue
+   `scripts/run-tests.ps1 -Manifest <path>` (chained into
    `scripts/diff-coverage.ps1`) in the SAME tool-call batch as step 4's agent
-   dispatch — don't wait for this to finish first. Stream a one-liner once it lands
+   dispatch — don't wait for this to finish first. Selection is test-class
+   granular on both sides of the diff (.NET) and file-granular
+   `jest --findRelatedTests` on JS — Nx repos included, never `nx affected`:
+   there is NO local run-everything mode in the tool (the PR pipeline runs the
+   full suite plus ui-automation on every PR; verified live before removal that
+   nx fanned a 4-file diff out to 40 projects/2504 tests/13 min of load-flaky
+   noise — relay the run entry's `selectionNote` so the
+   dependents-not-run-locally caveat reaches the
+   developer). `suiteScope: "solution-wide"` profiles skip
+   honestly (relay the skippedReason lines, they are findings about scope, not
+   noise); coverage self-calibrates (a broken mechanism on this machine is skipped
+   up front and reported DEGRADED; the JS related lane emits cobertura, so
+   diff-coverage works there too). There are NO flaky re-runs (removed — they
+   multiplied run time): every failed test lands in the artifact's
+   `flaky.mightBeFlaky` with a ready-to-run `rerunCommand`; the report presents
+   it as *failed — might be flaky, re-run yourself outside agentQ with this
+   command* — never softening the failure, never asserting flaky as fact.
+   Stream a one-liner once it lands
    ("Unit: 43/43 affected tests passed · changed-line coverage 54%").
 4. **Analysis & authoring** — dispatch `qa-analyst` (always) and `qa-scenario-writer`
    (only if the scenario cache is stale for this diff/AC hash) together with step
    3's script call, in the same message — real overlap, not just the two agents
    together: the scripts finish in under two minutes, the agents run for several, so
-   by the time either needs a script artifact it already exists.
+   by the time either needs a script artifact it already exists. When the mutation
+   consent from step 2 resolved yes, ALSO include `scripts/worktree.ps1 -Ensure`
+   (checkout is I/O — it doesn't contend with the test run) and dispatch
+   `qa-mutation-author` in the same batch: design + injection overlap step 3
+   freely; only the semantic-mutant DRIVER waits for step 3 to finish (CPU-heavy
+   phases never overlap).
    - `qa-scenario-writer` never reads step 3's output (only `diff-set.json`/
-     `adapter-profiles.json` from intake) — always safe to start immediately.
+     `adapter-profiles.json` from intake) — always safe to start immediately. It
+     renders into `<workspaceDir>/generated/` (staging — worktree.ps1 materializes
+     the files into both worktrees), so it doesn't depend on any worktree existing.
    - `qa-analyst` reads `diff-coverage.json`/`test-results.json` only for its Gap
      Lattice and flaky sections — it's briefed to do its other sections first and
      treat those two files as "not ready yet," not an error, if missing when it
@@ -129,25 +175,28 @@ intent, then map onto these four slots:
      regression-risk brief. If step 2c ran, also point it at
      `manual-test-candidates.json` — manual-test interpretation is part of the same
      brief.
-5. **💬 Mutation consent** (per `toggles.mutationConsent`) — but first apply your
-   own judgment, before even checking the toggle: if the diff has nothing worth
-   mutating (pure literal/label/copy/config changes, no branches or business
-   logic), skip automatically and say why in one line — never ask a consent
-   question whose only possible useful answer is "there's nothing to test."
-   Otherwise show scope + calibrated estimate. On yes: `qa-mutation-author`
-   designs semantic mutants → `scripts/semantic-mutant-driver.ps1` →
-   `scripts/stryker-run.ps1` → `scripts/merge-mutation-reports.ps1`. Stream
-   survivors as they land.
-6. **Risk score** — `scripts/risk-score.ps1`.
-7. **💬 Execution consent** (per `toggles.executionConsent`, literally — unlike
-   mutation, this is never a judgment call to bypass: it's consent to run code
-   against the developer's machine, not a value judgment about whether it's
-   worthwhile): disclose intake's outbound destinations; E2E additionally needs
-   the dev-stack health check to pass (never auto-start — hand over the
-   command). On yes:
-   `scripts/run-tests.ps1 -GeneratedOnly` (component/API in the worktree,
-   anti-vacuity against base AFTER mutation is done) and
-   `scripts/contract-check.ps1`. Frontend branches: run cached E2E specs
+5. **Mutation** (consent already answered in step 2; the auto-skip judgment and a
+   `SKIPPED — consent denied` line still apply; skipped under `--quick`) — after
+   step 3 has finished (the driver and Stryker are CPU-heavy): design + injection
+   may already be done from step 4's early dispatch →
+   `scripts/semantic-mutant-driver.ps1` → **`scripts/worktree.ps1 -Ensure` again**
+   (cheap reuse reset — removes the AGENTQ_MUTANT switches; generated tests
+   re-materialize from staging; stryker-run refuses to start while switches
+   remain) → `scripts/stryker-run.ps1` → `scripts/merge-mutation-reports.ps1`.
+   Stream survivors as they land.
+6. **Risk score** — `scripts/risk-score.ps1` (the contract signal already exists
+   from step 2 on committed-spec/ocelot repos — no recompute needed later).
+7. **Execution** (consent already answered in step 2, per
+   `toggles.executionConsent` literally — never a judgment call to bypass;
+   skipped under `--quick`): E2E additionally needs the dev-stack health check to
+   pass NOW (never auto-start — hand over the command). On yes:
+   `scripts/run-tests.ps1 -GeneratedOnly -ResultsLabel branch` (component/API in
+   the worktree → `test-results-generated-branch.json`, never clobbering Phase
+   2's `test-results.json`), then anti-vacuity AFTER mutation is done via
+   `scripts/worktree.ps1 -EnsureBase` + `scripts/run-tests.ps1 -GeneratedOnly
+   -WorktreeRoot <worktreeBaseDir> -ResultsLabel base` — never flip the main
+   worktree. Boot-capture contract lane (payroll-poc) + Pact run here too.
+   Frontend branches: run cached E2E specs
    (`npx playwright test --grep @agentq`); kick off `qa-e2e-author` in the
    background for new scenarios and (if a Figma link exists) design conformance.
 8. **Report** — delegate `qa-report-synthesizer` with the workspace dir. It
@@ -155,9 +204,12 @@ intent, then map onto these four slots:
    and its `-evidence.md` technical companion (which renders the Impact matrix
    row + impact map from `impact-index.json` / `testomat-candidates.json`).
    Re-save both as UTF-8 with BOM (PowerShell `[IO.File]::WriteAllText` with
-   `UTF8Encoding($true)`), show the main report's Result line + findings in
-   chat, then ask which generated tests to keep; on explicit yes apply them to
-   the product repo as a reviewed diff (placement per adapter profile).
+   `UTF8Encoding($true)`). **Do NOT restate the verdict or findings in chat** —
+   the closing message is a clickable link to the main report file and nothing
+   of its content (the report is the single source of the verdict; a chat copy
+   drifts). Then ask which generated tests to keep; on explicit yes apply them
+   to the product repo as a reviewed diff (placement per adapter profile; the
+   canonical file content lives in `<workspaceDir>/generated/`).
 9. **Cleanup verify** — `scripts/worktree.ps1 -Verify`. Confirm product repo
    untouched.
 

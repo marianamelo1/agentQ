@@ -27,9 +27,22 @@ Modes (exactly one switch per invocation):
   -DiffSet         -Manifest <run-manifest.json>     Writes diff-set.json (merge-base diff ∪ untracked).
   -Ensure          -Manifest <run-manifest.json>     Persistent detached worktree mirroring the dev's tree
                                                      (committed tip + uncommitted diff + untracked files).
+  -EnsureBase      -Manifest <run-manifest.json>     Persistent SECOND worktree at <workspaceDir>/worktree-base,
+                                                     pinned at baseSha, generated tests copied in. Anti-vacuity
+                                                     runs there  -  no more FlipToBase/FlipToBranch on the main
+                                                     worktree (each flip cost a full checkout + rebuild; the
+                                                     base worktree's build output stays warm across runs).
   -FlipToBase      -Manifest <run-manifest.json>     Worktree tracked state -> pure baseSha (anti-vacuity).
+                                                     LEGACY  -  prefer -EnsureBase (see above).
   -FlipToBranch    -Manifest <run-manifest.json>     Worktree back to full branch state after anti-vacuity.
+                                                     LEGACY  -  prefer -EnsureBase (see above).
   -Verify          -Manifest <run-manifest.json>     Phase 9 cleanup assertions. Writes nothing.
+
+Generated-test staging: agents render tests into <workspaceDir>/generated/<worktree-relative
+path> (NEVER directly into a worktree  -  verified live: a file written into worktree/ before
+-Ensure created it left a non-worktree husk dir that made `git worktree add` refuse). -Ensure,
+-EnsureBase, -FlipToBase and -FlipToBranch all re-materialize the staging dir's files into the
+target worktree, so a clean/reset can never lose an authored test.
 
 Contract: exit 0 = the script ran (findings live in the printed summary / JSON artifacts);
 non-zero = the script itself failed. Exactly one summary line is printed to stdout
@@ -44,6 +57,7 @@ param(
     [switch]$EnsureWorkspace,
     [switch]$DiffSet,
     [switch]$Ensure,
+    [switch]$EnsureBase,
     [switch]$FlipToBase,
     [switch]$FlipToBranch,
     [switch]$Verify,
@@ -267,17 +281,57 @@ function Get-ProductReposFromConfig {
 }
 
 function Get-WorkspaceWorktreeDirs {
-    # Enumerates workspace/<repoSlug>/<branchSlug>/worktree dirs (the only place worktrees live).
+    # Enumerates workspace/<repoSlug>/<branchSlug>/worktree[-base] dirs (the only
+    # places worktrees live)  -  -Heal must cover the base worktree too.
     $found = New-Object System.Collections.Generic.List[string]
     if (Test-Path -LiteralPath $script:WorkspaceRoot -PathType Container) {
         foreach ($repoDir in (Get-ChildItem -LiteralPath $script:WorkspaceRoot -Directory -ErrorAction SilentlyContinue)) {
             foreach ($branchDir in (Get-ChildItem -LiteralPath $repoDir.FullName -Directory -ErrorAction SilentlyContinue)) {
-                $wt = Join-Path $branchDir.FullName 'worktree'
-                if (Test-Path -LiteralPath $wt -PathType Container) { $found.Add($wt) }
+                foreach ($name in @('worktree', 'worktree-base')) {
+                    $wt = Join-Path $branchDir.FullName $name
+                    if (Test-Path -LiteralPath $wt -PathType Container) { $found.Add($wt) }
+                }
             }
         }
     }
     return ,@($found)
+}
+
+function Copy-GeneratedTests {
+    # Re-materializes the workspace's generated-test staging dir (see the header
+    # note) into a worktree. Idempotent; overwrites are correct  -  the staging dir
+    # is the single source of truth for agent-authored tests, so a clean/reset can
+    # never lose one. Returns the file count copied.
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkspaceDir,
+        [Parameter(Mandatory = $true)][string]$TargetDir
+    )
+    $gen = Join-Path $WorkspaceDir 'generated'
+    if (-not (Test-Path -LiteralPath $gen -PathType Container)) { return 0 }
+    $copied = 0
+    foreach ($f in (Get-ChildItem -LiteralPath $gen -Recurse -File -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($gen.Length).TrimStart('\', '/')
+        $dst = Join-Path $TargetDir $rel
+        $dstDir = Split-Path -Parent $dst
+        if (-not (Test-Path -LiteralPath $dstDir)) {
+            New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+        }
+        Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
+        $copied++
+    }
+    return $copied
+}
+
+function Test-IsOwnWorktreeRoot {
+    # TRUE only when $Dir is itself the top of a real git worktree. WHY not just
+    # `git status` succeeding: workspace/ sits INSIDE the agentQ repo, so any bare
+    # directory under it "succeeds" at git commands by resolving to agentQ's own
+    # repo (verified live: a husk dir with pre-written files passed the old check,
+    # -Ensure then tried to check out a product-repo SHA inside agentQ and failed).
+    param([Parameter(Mandatory = $true)][string]$Dir)
+    $top = Invoke-Git -Dir $Dir -GitArgs @('rev-parse', '--show-toplevel') -AllowFail
+    if ($script:LastGitExit -ne 0 -or $top.Count -eq 0) { return $false }
+    return ((Get-NormalizedPath -Path $top[0]) -eq (Get-NormalizedPath -Path $Dir))
 }
 
 function Restore-StrykerBackups {
@@ -501,15 +555,16 @@ function Invoke-ModeEnsureWorkspace {
 
     $worktreeDir = Join-Path $workspaceDir 'worktree'
     $manifestObj = [ordered]@{
-        repoSlug     = $RepoSlug          # the config key verbatim (may contain '/'), per CONTRACTS.md
-        repoPath     = $repo
-        branch       = $Branch
-        baseRef      = $baseRef
-        baseSha      = $baseSha
-        fetchedAt    = $fetchedAt
-        workspaceDir = $workspaceDir
-        worktreeDir  = $worktreeDir
-        ticketKey    = $TicketKey
+        repoSlug        = $RepoSlug       # the config key verbatim (may contain '/'), per CONTRACTS.md
+        repoPath        = $repo
+        branch          = $Branch
+        baseRef         = $baseRef
+        baseSha         = $baseSha
+        fetchedAt       = $fetchedAt
+        workspaceDir    = $workspaceDir
+        worktreeDir     = $worktreeDir
+        worktreeBaseDir = (Join-Path $workspaceDir 'worktree-base')   # created lazily by -EnsureBase
+        ticketKey       = $TicketKey
     }
 
     $manifestPath = Join-Path $workspaceDir 'run-manifest.json'
@@ -644,13 +699,28 @@ function Invoke-ModeEnsure {
     # strands mutated DLLs behind *.dll.stryker-unchanged backups, so the blast radius has to be
     # a disposable dir under workspace/, never the product repo.
     $reused = $false
+    $orphanBak = Join-Path $ws '_worktree-orphaned-files'
+    $preservedFiles = 0
     if (Test-Path -LiteralPath $wt -PathType Container) {
-        $null = Invoke-Git -Dir $wt -GitArgs @('status', '--porcelain') -AllowFail
-        if ($script:LastGitExit -eq 0) {
+        if (Test-IsOwnWorktreeRoot -Dir $wt) {
             $reused = $true
         }
         else {
-            # Broken husk (admin dir gone, corrupt .git link)  -  remove and rebuild from scratch.
+            # Husk: the dir exists but is NOT a worktree root  -  either a broken
+            # worktree (admin dir gone) or plain files written into worktree/ before
+            # it was created (verified live  -  see Test-IsOwnWorktreeRoot). Files
+            # inside may be authored work: preserve them, rebuild, then restore.
+            if (Test-Path -LiteralPath $orphanBak) { Remove-Item -LiteralPath $orphanBak -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $orphanBak | Out-Null
+            foreach ($f in (Get-ChildItem -LiteralPath $wt -Recurse -File -ErrorAction SilentlyContinue)) {
+                $rel = $f.FullName.Substring($wt.Length).TrimStart('\', '/')
+                if ($rel -eq '.git' -or $rel.StartsWith('.git\')) { continue }
+                $dst = Join-Path $orphanBak $rel
+                $dstDir = Split-Path -Parent $dst
+                if (-not (Test-Path -LiteralPath $dstDir)) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
+                Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
+                $preservedFiles++
+            }
             Remove-Item -LiteralPath $wt -Recurse -Force
         }
     }
@@ -682,11 +752,79 @@ function Invoke-ModeEnsure {
     # a freshly-added worktree is already pristine.
     $state = Restore-BranchState -Repo $repo -WorktreeDir $wt -WorkspaceDir $ws -CleanFirst:$reused
 
+    # Restore husk-preserved files (authored work written before the worktree
+    # existed), then re-materialize the generated-test staging dir  -  the clean
+    # above deliberately swept stale copies; staging is the source of truth.
+    if ($preservedFiles -gt 0 -and (Test-Path -LiteralPath $orphanBak)) {
+        foreach ($f in (Get-ChildItem -LiteralPath $orphanBak -Recurse -File -ErrorAction SilentlyContinue)) {
+            $rel = $f.FullName.Substring($orphanBak.Length).TrimStart('\', '/')
+            $dst = Join-Path $wt $rel
+            $dstDir = Split-Path -Parent $dst
+            if (-not (Test-Path -LiteralPath $dstDir)) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null }
+            Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
+        }
+        Remove-Item -LiteralPath $orphanBak -Recurse -Force
+    }
+    $genCopied = Copy-GeneratedTests -WorkspaceDir $ws -TargetDir $wt
+
     $mode = 'created'
     if ($reused) { $mode = 'reused' }
     $patch = 'none'
     if ($state.PatchApplied) { $patch = 'applied' }
-    Write-Output "Ensure: worktree $mode at $wt @ $($state.TipSha.Substring(0, 12)); uncommitted diff $patch; $($state.UntrackedCopied) untracked file(s) copied"
+    $extra = ''
+    if ($preservedFiles -gt 0) { $extra = "; $preservedFiles pre-existing file(s) preserved across husk rebuild" }
+    if ($genCopied -gt 0) { $extra += "; $genCopied generated test file(s) staged in" }
+    Write-Output "Ensure: worktree $mode at $wt @ $($state.TipSha.Substring(0, 12)); uncommitted diff $patch; $($state.UntrackedCopied) untracked file(s) copied$extra"
+}
+
+function Invoke-ModeEnsureBase {
+    $m = Read-RunManifest -Path $Manifest
+    $repo = $m.repoPath
+    $ws   = $m.workspaceDir
+    $wtb  = Join-Path $ws 'worktree-base'
+
+    # WHY a SECOND persistent worktree: anti-vacuity needs the generated tests to
+    # run against pure base. Flipping the MAIN worktree there and back costs two
+    # full checkouts plus a full rebuild each way (verified live)  -  a dedicated
+    # base worktree keeps its bin/obj warm across runs (baseSha changes rarely),
+    # so the anti-vacuity pass costs an incremental build, not a cold one.
+    $reused = $false
+    if (Test-Path -LiteralPath $wtb -PathType Container) {
+        if (Test-IsOwnWorktreeRoot -Dir $wtb) {
+            $reused = $true
+        }
+        else {
+            # Husk (see -Ensure): base worktree holds no authored originals  -
+            # staging is the source of truth  -  so no preservation needed here.
+            Remove-Item -LiteralPath $wtb -Recurse -Force
+        }
+    }
+    if (-not $reused) {
+        if (-not (Test-Path -LiteralPath $ws)) { New-Item -ItemType Directory -Force -Path $ws | Out-Null }
+        $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'prune')
+        $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wtb, $m.baseSha)
+    }
+    else {
+        # WHY -fd and not -fdx: ignored bin/obj are the warm build cache we keep on
+        # purpose. Clean sweeps stale generated tests; checkout pins the exact base.
+        $null = Invoke-Git -Dir $wtb -GitArgs @('clean', '-fd')
+        $null = Invoke-Git -Dir $wtb -GitArgs @('checkout', '--force', '--detach', $m.baseSha)
+    }
+
+    # Same node_modules junction rationale as -Ensure (gitignored, 1GB+, never
+    # checked out into a fresh worktree).
+    $repoNodeModules = Join-Path $repo 'node_modules'
+    $wtbNodeModules  = Join-Path $wtb 'node_modules'
+    if ((Test-Path -LiteralPath $repoNodeModules -PathType Container) -and
+        -not (Test-Path -LiteralPath $wtbNodeModules)) {
+        $null = New-Item -ItemType Junction -Path $wtbNodeModules -Target $repoNodeModules
+    }
+
+    $genCopied = Copy-GeneratedTests -WorkspaceDir $ws -TargetDir $wtb
+
+    $mode = 'created'
+    if ($reused) { $mode = 'reused' }
+    Write-Output "EnsureBase: base worktree $mode at $wtb @ $($m.baseSha.Substring(0, 12)); $genCopied generated test file(s) staged in"
 }
 
 function Invoke-ModeFlipToBase {
@@ -717,6 +855,10 @@ function Invoke-ModeFlipToBase {
     # clean -fd would delete the very tests anti-vacuity is about to run.
     $null = Invoke-Git -Dir $wt -GitArgs @('checkout', '--force', '--detach', $m.baseSha)
 
+    # Belt-and-braces: re-materialize the staging dir too (idempotent)  -  covers a
+    # flip that runs before any generated test ever landed in this worktree.
+    $null = Copy-GeneratedTests -WorkspaceDir $m.workspaceDir -TargetDir $wt
+
     Write-Output "FlipToBase: worktree at base $($m.baseSha.Substring(0, 12)); removed $removed branch-untracked file(s); generated tests preserved"
 }
 
@@ -731,6 +873,8 @@ function Invoke-ModeFlipToBranch {
     # the generated tests (untracked). Cleaning would destroy the files Phase 8 offers the
     # developer to keep, plus the warm state the next run starts from.
     $state = Restore-BranchState -Repo $m.repoPath -WorktreeDir $wt -WorkspaceDir $m.workspaceDir
+
+    $null = Copy-GeneratedTests -WorkspaceDir $m.workspaceDir -TargetDir $wt
 
     $patch = 'none'
     if ($state.PatchApplied) { $patch = 'applied' }
@@ -826,6 +970,15 @@ function Invoke-ModeVerify {
         $parts.Add('worktree absent (mutation lane never ran)')
     }
 
+    # Base worktree (anti-vacuity home since -EnsureBase): Stryker never runs there,
+    # but assert that anyway  -  a stranded mutant would poison the warm base build.
+    $wtBase = Join-Path (Split-Path -Parent $wt) 'worktree-base'
+    if (Test-Path -LiteralPath $wtBase -PathType Container) {
+        $baseOrphans = @(Get-ChildItem -LiteralPath $wtBase -Recurse -File -Filter '*.stryker-unchanged' -ErrorAction SilentlyContinue).Count
+        $findings += $baseOrphans
+        $parts.Add("stryker-unchanged in base worktree: $baseOrphans")
+    }
+
     # We never write into the product repo, so the only leftover we could conceivably have caused
     # there is a Stryker backup from an isolation violation  -  assert there are none, and hand the
     # orchestrator the repo's own status line count to eyeball (dev churn makes non-zero normal).
@@ -854,11 +1007,12 @@ try {
     if ($EnsureWorkspace) { $modes += 'EnsureWorkspace' }
     if ($DiffSet)         { $modes += 'DiffSet' }
     if ($Ensure)          { $modes += 'Ensure' }
+    if ($EnsureBase)      { $modes += 'EnsureBase' }
     if ($FlipToBase)      { $modes += 'FlipToBase' }
     if ($FlipToBranch)    { $modes += 'FlipToBranch' }
     if ($Verify)          { $modes += 'Verify' }
     if ($modes.Count -ne 1) {
-        throw "Exactly one mode switch is required: -DetectRepo | -Heal | -EnsureWorkspace | -DiffSet | -Ensure | -FlipToBase | -FlipToBranch | -Verify (got: $(if ($modes.Count -eq 0) { 'none' } else { $modes -join ', ' }))"
+        throw "Exactly one mode switch is required: -DetectRepo | -Heal | -EnsureWorkspace | -DiffSet | -Ensure | -EnsureBase | -FlipToBase | -FlipToBranch | -Verify (got: $(if ($modes.Count -eq 0) { 'none' } else { $modes -join ', ' }))"
     }
 
     switch ($modes[0]) {
@@ -867,6 +1021,7 @@ try {
         'EnsureWorkspace' { Invoke-ModeEnsureWorkspace }
         'DiffSet'         { Invoke-ModeDiffSet }
         'Ensure'          { Invoke-ModeEnsure }
+        'EnsureBase'      { Invoke-ModeEnsureBase }
         'FlipToBase'      { Invoke-ModeFlipToBase }
         'FlipToBranch'    { Invoke-ModeFlipToBranch }
         'Verify'          { Invoke-ModeVerify }

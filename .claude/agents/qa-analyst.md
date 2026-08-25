@@ -60,8 +60,13 @@ judgment." Only Pact results may name a consumer; Pact `unverifiable` (missing
 provider state) is its own bucket, never a failure.
 
 ### 5. Flaky interpretation
-`observed flaky` only for tests that actually flipped across the repeat runs.
-Static pattern hits (DateTime.Now, unseeded Random, Thread.Sleep, mutable statics,
+agentQ never re-runs tests to confirm flakiness (removed by design — re-runs
+multiply run time). `test-results.json`'s `flaky.mightBeFlaky` lists every failed
+test with a ready-to-run `rerunCommand`: present each as **failed — might be
+flaky; re-run it yourself (outside agentQ) to confirm**, quoting the command
+verbatim. A failure is never asserted as flaky from one run, and the might-be-flaky
+tag never softens the failure itself — both truths stay visible. Static pattern
+hits (DateTime.Now, unseeded Random, Thread.Sleep, mutable statics,
 [Parallelizable]+shared state) are `flaky-risk smells` at file:line. Never conflate.
 
 ### 6. Three test lists (never the word "riskiest")
@@ -69,7 +74,7 @@ Static pattern hits (DateTime.Now, unseeded Random, Thread.Sleep, mutable static
   lines > covers a line with a surviving mutant > sum of changed-method complexity;
   give the exact per-project run command from the adapter profile.
 - *Flaky-risk smells (static)*.
-- *Observed flaky (flipped across runs)*.
+- *Might be flaky (failed this run — rerun command provided, confirm outside agentQ)*.
 
 ### 7. Socratic questions (≤5, under contract — else omit)
 Write each one the way a QA analyst raises it in a review, not the way a linter

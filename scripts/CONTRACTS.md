@@ -61,9 +61,27 @@ explicitly (see `SKILL.md` Inputs):
   "fetchedAt": "2026-08-20T14:05:00Z",
   "workspaceDir": "C:\\agentQ\\workspace\\e-conomic__payroll-poc\\feature-EC-1234-vat-rounding",
   "worktreeDir": "<workspaceDir>\\worktree",
+  "worktreeBaseDir": "<workspaceDir>\\worktree-base",
   "ticketKey": "EC-1234"
 }
 ```
+`worktreeBaseDir` names the persistent BASE worktree (`worktree.ps1 -EnsureBase`,
+created lazily — the path is in the manifest before the dir exists). Anti-vacuity
+runs there (`run-tests.ps1 -GeneratedOnly -WorktreeRoot <worktreeBaseDir>
+-ResultsLabel base`) instead of flipping the main worktree to base and back — each
+flip cost a full checkout + cold rebuild; the base worktree's build output stays
+warm across runs because baseSha changes rarely. Older manifests without the field
+still work (`-EnsureBase` derives it from `workspaceDir`).
+
+## generated/  (staging dir for agent-authored tests — source of truth)
+Agents render generated tests into `<workspaceDir>/generated/<worktree-relative
+path>` — NEVER directly into a worktree. WHY (verified live): a test written into
+`worktree/` before `-Ensure` created it left a non-worktree husk dir that broke
+`git worktree add`; and `-Ensure`'s reuse-path `clean -fd` deletes untracked files,
+silently losing authored work. `worktree.ps1 -Ensure`, `-EnsureBase`, `-FlipToBase`
+and `-FlipToBranch` all re-materialize the staging dir into the target worktree, so
+generated tests survive every reset and exist in BOTH worktrees (branch run +
+anti-vacuity base run) without hand-copying.
 
 ## jira-ticket.json  (scripts/jira.ps1 — invoked by qa-intake; direct REST, no MCP)
 Written by `scripts/jira.ps1 -IssueIdOrKey <key-or-url> -OutPath <file>` — a direct
@@ -128,6 +146,7 @@ One entry per affected **test project**:
       "assertionDialect": "fluentassertions",   // native | fluentassertions | shouldly | jest-dom
       "categoryFilter": "Category=agentQ-generated",   // xunit trait form; nunit uses TestCategory=
       "coverageMechanism": "collector",  // collector (coverlet referenced) | dotnet-coverage
+      "suiteScope": "diff-sensitive",    // diff-sensitive (default) | solution-wide
       "placementRoot": "apps/backend/tests/payroll/Visma.Payroll.Domain.UnitTests",
       "placementAllowedFolders": ["Domain"],   // payroll test_placement allow-list; empty = unrestricted
       "sutProjects": ["apps/backend/src/payroll/Visma.Payroll.Domain/Visma.Payroll.Domain.csproj"]
@@ -135,6 +154,14 @@ One entry per affected **test project**:
   ]
 }
 ```
+`suiteScope: "solution-wide"` marks architecture/static-analysis suites whose tests
+scan the entire solution rather than specific SUT code (e.g. ContainerIntegrity /
+convention / arch-rule projects — qa-intake sets it). `run-tests.ps1` never runs
+such a suite unfiltered off the diff heuristic: changed test classes inside it run
+filtered; otherwise the project is an honest `skippedReason` entry (verified live:
+one solution-wide suite, 371 tests at 5m19s, dominated a review's wall-clock with
+zero diff-relevant signal — and CI runs these suites on every PR anyway).
+There is no local override — the PR pipeline runs these suites on every PR.
 
 ## test-results.json  (run-tests.ps1)
 ```json
@@ -147,14 +174,73 @@ One entry per affected **test project**:
       "testsDiscovered": 43, "testsExecuted": 43, "passed": 43, "failed": 0, "skipped": 0,
       "zeroMatchError": false,
       "durationSeconds": 4.1,
-      "failures": [{ "fqn": "…", "message": "…", "stack": "…" }],
+      "coverageDegraded": false,
+      "coverageNote": null,          // WHY coverage degraded/was skipped, when it was
+      "skippedReason": null,         // set (with exitCode 0) when the project run was honestly skipped
+      "selection": "related-files",  // JS entries only (the only JS selection mode)
+      "selectionNote": "…",          // JS entries only: what was selected AND what deliberately wasn't (dependents run in the PR pipeline)
+      "failures": [{ "fqn": "…", "file": "…", "message": "…", "stack": "…", "rerunCommand": "…" }],
       "perTestDurations": [{ "fqn": "…", "seconds": 0.12 }],
       "trxPath": "…"
     }
   ],
-  "flaky": { "repeats": 3, "flipped": [], "skippedReason": null }
+  "flaky": {
+    "policy": "no-local-reruns",
+    "note": "<why agentQ never re-runs, and what the developer should do>",
+    "mightBeFlaky": [{ "fqn": "…", "projectPath": "…", "rerunCommand": "…" }]
+  }
 }
 ```
+`flaky` carries NO rerun results — agentQ never re-runs tests to confirm
+flakiness (removed by design: re-runs multiply the run's wall-clock, and one
+machine's re-run can't prove stability anyway). Every failed test appears in
+`mightBeFlaky` with a ready-to-run `rerunCommand` (JS: config + test file +
+regex-escaped `-t` name; .NET: `dotnet test <proj> --filter
+"FullyQualifiedName~<name>"`). Consumers present each as *failed — might be
+flaky; re-run outside agentQ to confirm*, quoting the command verbatim — the tag
+never softens the failure, and "flaky" is never asserted as fact from one run.
+`failures[].file`/`failures[].rerunCommand` exist on JS entries (the .NET
+command is synthesized into `mightBeFlaky` from the fqn).
+Affected mode (Phase 2) writes `test-results.json`. `-GeneratedOnly` (Phase 7)
+writes `test-results-generated.json`, or `test-results-generated-<label>.json`
+with `-ResultsLabel` — the orchestrator uses `-ResultsLabel branch` and
+`-ResultsLabel base` so the branch-side and anti-vacuity runs never clobber each
+other (or Phase 2's results — verified live, that clobbering happened). A run
+entry with `skippedReason` (e.g. a solution-wide suite with nothing diff-relevant)
+always carries `exitCode: 0` and `zeroMatchError: false` so risk-score's
+build-failed heuristic cannot misread an honest skip.
+
+**JS selection is file-granular, always** (every JS runner incl. Nx): per
+project, `jest --findRelatedTests <changed files under the project>` with the
+project's own jest.config, per-test JSON at `jest-results-<projKey>.json`,
+and cobertura coverage copied to `cov\<projKey>.cobertura.xml` so
+diff-coverage.ps1 reads the JS lane (verified live: the old json-summary
+reporter left it REFUSED). Dependent projects are deliberately NOT run locally
+and **no run-everything mode exists** (removed by design — verified live before
+removal: `nx affected --target=test` fanned a 4-file leaf diff out to 40
+projects / 2504 tests / 13 min of load-flaky noise, with aggregate counts only
+and no flip detection); `selectionNote` states the not-run-locally scope, and
+the PR pipeline runs the full suite plus ui-automation on every PR.
+
+## calibration.json  (workspace/<repoSlug>/calibration.json — machine-local, merged never clobbered)
+```json
+{
+  "plainRunSeconds": 42.3,           // last affected-subset wall-clock (run-tests.ps1)
+  "coverage": {
+    "dotnetCoverageWorks": false,    // dotnet-coverage produced parseable class data on this machine
+    "collectorWorks": true,          // ditto for the XPlat/coverlet collector
+    "probedAt": "2026-08-24T21:00:00Z"
+  }
+}
+```
+The `coverage` capability keys are self-recorded by `run-tests.ps1`: a completed
+coverage-wrapped run with zero `<class>` elements records its mechanism `false`
+(the run's TRX results are kept — a completed suite is NEVER re-run over empty
+coverage); any run with real class data records `true` ("worked anywhere" wins —
+one empty project on a working mechanism is a filter artifact, not a broken
+profiler). A `false` key makes later runs skip that mechanism's instrumentation up
+front, reporting the coverage row DEGRADED with the reason; `-ForceCoverage`
+re-probes after a machine-level fix.
 
 ## diff-coverage.json  (diff-coverage.ps1)
 ```json
@@ -199,7 +285,7 @@ itself, since it authored them before Stryker's own survivors are even known
   "given": "…", "when": "…", "then": "…",
   "http": { "method": "POST", "path": "/api/invoices", "body": {}, "expectStatus": 422, "expectBody": {} },
   "targetProject": "<projectPath from adapter-profiles>",
-  "renderedTo": ["worktree-relative path of generated test file"],
+  "renderedTo": ["worktree-relative path of generated test file — the physical file lives in <workspaceDir>/generated/<that path> (the staging dir; see the generated/ section above), and worktree.ps1 materializes it into both worktrees"],
   "executionState": "EXECUTED_PASSED" | "EXECUTED_FAILED" | "GENERATED_NOT_EXECUTED" | null,
   "vacuityGrade": "verified_against_base" | "static_only" | null
 }
@@ -228,6 +314,16 @@ number look better; an untouched `null` correctly reads as "not yet executed."
   "skipped": false, "skipReason": null
 }
 ```
+schema-diff's committed-spec path no longer needs `-SpecPath`: the changed spec
+file(s) are auto-derived from `diff-set.json` (changed ∪ untracked
+`openapi*`/`swagger*` files). Several changed specs are each diffed and merged
+into one report (`captureProvenance.route` lists them `; `-joined; a per-spec
+skip becomes an INFO entry with `ruleId: "spec-skipped"`). No spec changed →
+`skipped: true` with the honest reason — an unchanged committed spec is an
+unchanged documented contract on this capture path, never "0 breaking".
+Because it needs only git, the orchestrator runs this lane at INTAKE time on
+committed-spec/ocelot repos — only the boot-capture path (payroll-poc) waits for
+the execution consent.
 
 ## risk-score.json  (risk-score.ps1 — deterministic)
 ```json
@@ -321,7 +417,10 @@ endpoint path, `Table`/`Table.Column`, type/method name, or file path).
     { "repoSlug": "e-conomic/client", "indexOnly": false,
       "file": "src/api/entries.ts", "line": 12,
       "seed": "POST /api/entries", "matchKind": "endpoint-reference",
-      "context": "<the matching source line, trimmed>" }
+      "context": "<the matching source line, trimmed, capped at 240 chars>" }
+  ],
+  "matchStats": [
+    { "seed": "createdraftentries", "total": 1841, "kept": 200 }
   ],
   "reverseCoverage": {
     "available": false, "reason": "no coverage artifact for this branch",
@@ -334,8 +433,14 @@ endpoint path, `Table`/`Table.Column`, type/method name, or file path).
 Seed kinds: `endpoint | symbol | dto | table | column | file`. In branch mode the
 script extracts them from the diff: routes from `[Route]`/`[Http*]`/`Map*(`/Ocelot
 configs, tables/columns from changed migration files, type/method names from changed
-hunks. Generic identifiers (short names, common words) are dropped into
-`droppedSeeds` — a match on `Name` is noise, not impact. `matchKind`:
+hunks (comment lines are skipped and C# type captures must be PascalCase — prose
+words like `with`/`explicitly` used to leak in as seeds and produce tens of
+thousands of noise matches). Generic identifiers (short names, common words,
+all-lowercase non-identifiers) are dropped into
+`droppedSeeds` — a match on `Name` is noise, not impact. `matchStats` records any
+seed whose matches were truncated at the per-seed cap (200): a seed with hundreds
+of references means the identifier is ubiquitous, not that everything is affected,
+and the cap is stated rather than silently implied as full coverage. `matchKind`:
 `endpoint-reference | symbol-reference | dto-reference | table-reference |
 route-config | package-reference`. `indexOnly: true` marks matches from
 `testRepos` (e.g. the UI-automation repo) — always reported as

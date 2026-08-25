@@ -478,6 +478,25 @@ try {
         }
     }
 
+    # ---------------- guard: semantic-mutant switches must be gone ----------------
+    # WHY: verified live  -  running Stryker on a worktree that still carries the
+    # AGENTQ_MUTANT env-var switches from the semantic tier makes Stryker mutate the
+    # injected switch lines THEMSELVES, manufacturing artifact "survivors" that are
+    # not product code. The orchestration order is: semantic tier -> driver ->
+    # `worktree.ps1 -Ensure` (cheap reuse reset; generated tests re-staged) -> this
+    # script. Fail fast and loud when that reset was skipped.
+    $dirtyMutantFiles = @()
+    foreach ($cf in $changedCs) {
+        $abs = Join-Path $worktreeDir (([string]$cf.Path) -replace '/', '\')
+        if ((Test-Path -LiteralPath $abs -PathType Leaf) -and
+            (Select-String -LiteralPath $abs -Pattern 'AGENTQ_MUTANT' -Quiet)) {
+            $dirtyMutantFiles += [string]$cf.Path
+        }
+    }
+    if ($dirtyMutantFiles.Count -gt 0) {
+        throw ("worktree still contains AGENTQ_MUTANT semantic-mutant switches in: {0}  -  run scripts/worktree.ps1 -Ensure to reset the worktree before the mechanical tier (Stryker would mutate the injected switches themselves and manufacture artifact survivors)" -f ($dirtyMutantFiles -join ', '))
+    }
+
     # ---------------- zero-coverage line map from diff-coverage.json ----------------
     # Only 'uncovered' gap lines are subtracted; 'partial-branch' lines stay in scope  - 
     # mutants there are reachable and killable.

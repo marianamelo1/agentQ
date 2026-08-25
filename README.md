@@ -53,6 +53,7 @@ plain language:
 | `--repo <slug-or-fragment>` | Which registered repo (e.g. `payroll-poc`, or the full `e-conomic/payroll-poc` key) |
 | `--worktree <path-or-name>` | A specific local checkout — a full path, or just the worktree's directory name |
 | `--ticket <KEY>` | The Jira ticket key, if you don't want it inferred from the branch/commits |
+| `--quick` | Static lanes only — no test execution, no mutation (see [Quick mode](#quick-mode---quick)) |
 
 ```
 /qa-review feature/EC-8876
@@ -79,6 +80,38 @@ every match (repo, branch, path) and asks which one you mean. Add `--repo` or
 `--branch` if you already know which one and want to skip the question. Not using
 worktrees at all works exactly the same way — there's just the one checkout to find.
 
+## Quick mode (`--quick`)
+
+`--quick` runs only the static lanes — intake, committed-spec contract diff,
+impact/manual-test candidates, analysis, and the report. Nothing executes: no
+test run, no mutation. It answers from *reading* the code, not from running it,
+so it finishes in a fraction of a full run.
+
+```
+/qa-review --quick
+/qa-review payroll-poc --quick
+/qa-review --branch feature/EC-8876 --ticket EC-8876 --quick
+quick review of my branch EC-8876
+```
+
+You still get: what the branch changes, whether it looks aligned with the
+ticket's ACs, breaking API contract changes, the impact map, and the analyst's
+questions. 
+
+**When to use it:**
+
+- **Mid-development**, while the branch is still moving — a fast sanity loop
+  ("am I drifting from the ticket? did I just break the API contract?") without
+  paying for builds and test runs each time.
+- **Early direction checks** — right after the first commits, before investing
+  more.
+- **When you can't execute** — dev stack down, or a machine without warm SDKs.
+
+**When not to use it:** right before opening the PR. That's the moment for the
+full run — executed tests, anti-vacuity, mutation survivors. "Appears met by
+reading" and "verified by a test that failed on base" are very different levels
+of confidence.
+
 ## Get QA Impact on you code
 
 "What could my change affect?" — without running a review. `/qa-impact` scans
@@ -102,7 +135,7 @@ plus `--target`.
 
 - **Agents judge, scripts execute.** Six subagents in `.claude/agents/` do only
   judgment work (classification, analysis, test authoring, mutation design,
-  design conformance, report synthesis). Eleven deterministic PowerShell scripts
+  design conformance, report synthesis). Twelve deterministic PowerShell scripts
   in `scripts/` do everything mechanical — so the same branch produces the same
   verdict twice.
 - Everything lands in this repo: intermediate JSON under
@@ -114,9 +147,11 @@ plus `--target`.
 
 - Before mutation testing runs, agentQ tells you the scope and how long it'll take — your call to proceed.
 - Before running your code (including E2E), agentQ tells you exactly what it'll touch — like an external URL or database — so nothing happens without you knowing.
+- Both questions arrive together in one message right after intake, so you answer while agentQ is already working — your reading time never stalls the run.
 - Say no to either, and the report just shows it as skipped.
 - For E2E, agentQ checks your dev server is already running and gives you the command to start it.
 - Set `always`/`never` in config if you'd rather skip being asked.
+- In a hurry? `/qa-review --quick` skips both execution gates entirely — see [Quick mode](#quick-mode---quick).
 
 
 ## Honest reporting
