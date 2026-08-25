@@ -199,7 +199,11 @@ intent, then map onto these four slots:
    `scripts/semantic-mutant-driver.ps1` → **`scripts/worktree.ps1 -Ensure` again**
    (cheap reuse reset — removes the AGENTQ_MUTANT switches; generated tests
    re-materialize from staging; stryker-run refuses to start while switches
-   remain) → `scripts/stryker-run.ps1` → `scripts/merge-mutation-reports.ps1`.
+   remain) → `scripts/stryker-run.ps1` (**must be a background shell job, not a
+   foreground command** — this phase is legitimately multi-minute; a short
+   foreground timeout sends SIGTERM before the script's own anti-hang valve
+   fires, yielding no mutation results and potentially orphaning
+   `.dll.stryker-unchanged` backups) → `scripts/merge-mutation-reports.ps1`.
    Stream survivors as they land.
 6. **Risk score** — `scripts/risk-score.ps1` (the contract signal already exists
    from step 2 on committed-spec/ocelot repos — no recompute needed later).
@@ -211,8 +215,9 @@ intent, then map onto these four slots:
    the worktree → `test-results-generated-branch.json`, never clobbering Phase
    2's `test-results.json`), then anti-vacuity AFTER mutation is done via
    `scripts/worktree.ps1 -EnsureBase` + `scripts/run-tests.ps1 -GeneratedOnly
-   -WorktreeRoot <worktreeBaseDir> -ResultsLabel base` — never flip the main
-   worktree. Boot-capture contract lane (payroll-poc) + Pact run here too.
+   -WorktreeRoot <worktreeBaseDir> -ResultsLabel base` (**`-EnsureBase` can be
+   multi-minute on a cold first run — background it like `stryker-run.ps1`**) —
+   never flip the main worktree. Boot-capture contract lane (payroll-poc) + Pact run here too.
    Frontend branches: run cached E2E specs
    (`npx playwright test --grep @agentq`); kick off `qa-e2e-author` in the
    background for new scenarios and (if a Figma link exists) design conformance.

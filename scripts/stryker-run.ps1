@@ -557,6 +557,10 @@ function Invoke-OneStryker {
 # ----------------------------------------------------------------------------
 # main
 # ----------------------------------------------------------------------------
+# Pre-declared so the finally block can reference it regardless of where an
+# external SIGTERM kills the process (inside the try $worktreeDir gets its
+# real value; before that, the finally guard keeps it a no-op).
+$worktreeDir = ''
 try {
     if ($EnsureTool) {
         # Tool bootstrap only -- no mutation run, no manifest. Same pinned
@@ -1164,4 +1168,18 @@ catch {
     $ErrorActionPreference = 'Continue'
     Write-Error ("stryker-run failed: {0}" -f $_.Exception.Message)
     exit 1
+}
+finally {
+    # Safety net for external kills (SIGTERM): pwsh 7 on macOS/Linux runs the
+    # finally block on a clean SIGTERM-triggered exit, so DLL backups are
+    # restored even when the kill arrived before the in-run Restore-StrykerBackup
+    # calls could execute. Idempotent -- a restore with no backups present is a
+    # no-op. Guarded by a local Continue so a restore error never masks the
+    # original failure.
+    if (-not [string]::IsNullOrWhiteSpace($worktreeDir)) {
+        $__prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $null = Restore-StrykerBackup -Root $worktreeDir } catch { }
+        $ErrorActionPreference = $__prev
+    }
 }
