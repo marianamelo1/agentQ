@@ -137,6 +137,14 @@ if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) {
     Write-Host "[missing] dotnet-coverage (coverage lane) - run .\scripts\setup-mcp.ps1" -ForegroundColor Red
 }
 
+if (Get-Command coverlet -ErrorAction SilentlyContinue) {
+    Write-Host "[ok] coverlet.console (coverage fallback - only used once dotnet-coverage is calibrated broken on this machine)" -ForegroundColor Green
+} elseif (Test-Path (Join-Path $HOME (Join-Path '.dotnet' (Join-Path 'tools' $(if ($IsWin) { 'coverlet.exe' } else { 'coverlet' }))))) {
+    Write-Host "[ok] coverlet.console installed - not on PATH in this session; restart the terminal" -ForegroundColor Yellow
+} else {
+    Write-Host "[not installed] coverlet.console (coverage fallback; expected on almost every machine - run-tests.ps1 installs it on demand only if dotnet-coverage turns out calibrated-broken here, e.g. the documented osx-arm64 gap; manual: dotnet tool install --global coverlet.console)" -ForegroundColor Yellow
+}
+
 $pwCache = if ($IsWin) { Join-Path $env:LOCALAPPDATA 'ms-playwright' }
            elseif ($null -ne $IsMacOS -and $IsMacOS) { Join-Path $HOME (Join-Path 'Library' (Join-Path 'Caches' 'ms-playwright')) }
            else { Join-Path $HOME (Join-Path '.cache' 'ms-playwright') }
