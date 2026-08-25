@@ -188,11 +188,14 @@ foreach ($run in $runs) {
     $failsArr   = @(Get-Prop $run 'failures' @())
     $testsExecutedTotal += $executed
     $totalFailed += $failedCnt
-    # Build-failure detection: nonzero exit with ZERO tests executed and no recorded test
-    # failures means the process died before any test ran (compile/restore error).
-    # zeroMatchError is excluded on purpose  -  TreatNoTestsAsError makes a zero-match
-    # filter exit nonzero too, but that is a filter problem, not a build failure.
-    if ($exit -ne 0 -and $executed -eq 0 -and $failsArr.Count -eq 0 -and -not $zeroMatch) {
+    # Build-failure detection: nonzero exit with ZERO tests executed means the process died
+    # before any test ran (compile/restore error) - either with no recorded failure entry at
+    # all, or (per CONTRACTS.md) a single synthesized entry carrying fqn "<build>" with the
+    # real compiler/restore diagnostic. zeroMatchError is excluded on purpose  -
+    # TreatNoTestsAsError makes a zero-match filter exit nonzero too, but that is a filter
+    # problem, not a build failure.
+    $isBuildFailureEntry = ($failsArr.Count -eq 0) -or (@($failsArr | Where-Object { (Get-Prop $_ 'fqn' '') -eq '<build>' }).Count -gt 0)
+    if ($exit -ne 0 -and $executed -eq 0 -and $isBuildFailureEntry -and -not $zeroMatch) {
         $buildFailed = $true
     }
 }

@@ -150,6 +150,57 @@ function Get-LogicalCoreCount {
     try { return [Environment]::ProcessorCount } catch { return 4 }
 }
 
+function Find-NearestNuGetConfig {
+    # Mirrors NuGet's own directory walk-up (project dir -> ancestors, stopping at
+    # the repo root) so we only act when normal `dotnet build` discovery would
+    # ALREADY fail -- every repo whose layout already works (an ancestor
+    # nuget.config) is left byte-for-byte unaffected by the fallback below.
+    param([Parameter(Mandatory = $true)][string]$StartDir, [Parameter(Mandatory = $true)][string]$CeilingDir)
+    $ceiling = ((Resolve-Path -LiteralPath $CeilingDir).Path).TrimEnd('\', '/')
+    $dir = $StartDir
+    while ($true) {
+        $hit = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^nuget\.config$' }) | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+        if ($dir.TrimEnd('\', '/') -ieq $ceiling) { break }
+        $parent = Split-Path -Parent $dir
+        if ([string]::IsNullOrEmpty($parent) -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    return $null
+}
+
+$script:nugetConfigOverrideCache = @{}
+function Get-RepoNuGetConfigOverride {
+    # WHY: verified live on payroll-poc  -  its private feed is declared in
+    # apps/backend/src/nuget.config, but a test project under apps/backend/tests/
+    # is a SIBLING of src/, not a descendant, so NuGet's own directory walk-up
+    # never finds it and restore falls back to nuget.org alone (NU1101 on an
+    # internal package). Only kicks in when normal discovery would already fail;
+    # only acts when the repo has exactly one such file so this never guesses
+    # between competing configs -- an ambiguous or absent case is left to fail
+    # exactly as honestly as it does today.
+    param([Parameter(Mandatory = $true)][string]$ProjAbs, [Parameter(Mandatory = $true)][string]$RepoPath)
+    $cacheKey = "$RepoPath|$ProjAbs"
+    if ($script:nugetConfigOverrideCache.ContainsKey($cacheKey)) { return $script:nugetConfigOverrideCache[$cacheKey] }
+    $projDir = Split-Path -Parent $ProjAbs
+    $result = $null
+    if (-not (Find-NearestNuGetConfig -StartDir $projDir -CeilingDir $RepoPath)) {
+        $seen = @{}
+        $all = New-Object System.Collections.Generic.List[string]
+        foreach ($pattern in @('nuget.config', 'NuGet.Config')) {
+            foreach ($f in [System.IO.Directory]::EnumerateFiles($RepoPath, $pattern, [System.IO.SearchOption]::AllDirectories)) {
+                if ($f -match '[\\/](bin|obj|node_modules|\.git)[\\/]') { continue }
+                $key = $f.ToLowerInvariant()
+                if (-not $seen.ContainsKey($key)) { $seen[$key] = $true; $all.Add($f) }
+            }
+        }
+        if ($all.Count -eq 1) { $result = $all[0] }
+    }
+    $script:nugetConfigOverrideCache[$cacheKey] = $result
+    return $result
+}
+
 function Invoke-JestRelatedRun {
     # File-granular JS selection: per-project `jest --findRelatedTests <changed
     # files>` with per-test JSON results.
@@ -811,6 +862,8 @@ try {
             # (never a .sln  -  e-conomic's is 426 projects).
             if (-not $builtProjects.Contains($projAbs)) {
                 $buildArgs = @('build', $projAbs, '-c', 'Debug', '-v:m', '--nologo')
+                $nugetConfigOverride = Get-RepoNuGetConfigOverride -ProjAbs $projAbs -RepoPath $execRoot
+                if ($nugetConfigOverride) { $buildArgs += @('--configfile', $nugetConfigOverride) }
                 # WHY Tee-Object (not `2>&1`): capture the real diagnostic text
                 # for the artifact while still streaming to the console, without
                 # touching stderr -- PS 5.1 wraps redirected native stderr in
