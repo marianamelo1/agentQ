@@ -75,9 +75,16 @@ intent, then map onto these four slots:
    take them verbatim from the resolved candidate above, not the registered
    config path, since a `git worktree add` sibling's `repoPath` differs from it —
    to create `workspace/<repo>/<branch>/` and write `run-manifest.json` (pin the
-   base SHA once — never re-resolve). Probe
-   SDK/node/docker. First run on a repo → offer the one-time setup (Stryker tool
-   restore, oasdiff download) as a consented step; declining just narrows lanes.
+   base SHA once — never re-resolve). In the SAME batch, also run
+   `scripts/worktree.ps1 -DiffSet -Manifest <path>` — pure git, no reason to
+   make `qa-intake` wait to derive it itself. This is what lets
+   `scripts/adapter-cache.ps1 -Probe` (step 2, task 3) run immediately when
+   `qa-intake` starts instead of after its own diff-set derivation; `qa-intake`'s
+   own task 1 guard ("if `diff-set.json` doesn't exist yet") already no-ops
+   cleanly if this pre-run raced ahead of it or wasn't reached for some reason.
+   Probe SDK/node/docker. First run on a repo → offer the one-time setup
+   (Stryker tool restore, oasdiff download) as a consented step; declining just
+   narrows lanes.
 2. **Intake** — delegate to `qa-intake` with the manifest path. It writes
    `diff-set.json` + `adapter-profiles.json` + `jira-ticket.json` (the last via
    `scripts/jira.ps1` — direct REST, no Jira MCP; ALWAYS written when a ticket
@@ -169,20 +176,51 @@ intent, then map onto these four slots:
    (only if the scenario cache is stale for this diff/AC hash) together with step
    3's script call, in the same message — real overlap, not just the two agents
    together: the scripts finish in under two minutes, the agents run for several, so
-   by the time either needs a script artifact it already exists. When the mutation
-   consent from step 2 resolved yes, ALSO include `scripts/worktree.ps1 -Ensure`
-   (checkout is I/O — it doesn't contend with the test run) and dispatch
-   `qa-mutation-author` in the same batch: design + injection overlap step 3
-   freely; only the semantic-mutant DRIVER waits for step 3 to finish (CPU-heavy
-   phases never overlap).
-   - `qa-scenario-writer` never reads step 3's output (only `diff-set.json`/
-     `adapter-profiles.json` from intake) — always safe to start immediately. It
-     renders into `<workspaceDir>/generated/` (staging — worktree.ps1 materializes
-     the files into both worktrees), so it doesn't depend on any worktree existing.
-   - `qa-analyst` reads `diff-coverage.json`/`test-results.json` only for its Gap
-     Lattice and flaky sections — it's briefed to do its other sections first and
-     treat those two files as "not ready yet," not an error, if missing when it
-     starts. Its output is a file, `<workspaceDir>/analyst-brief.json` (shape in
+   by the time either needs a script artifact it already exists. ALSO include
+   `scripts/test-inventory.ps1 -Manifest <path>` in this same batch (mechanical,
+   <1s — a regex scan, not a build) — its output, `test-inventory.json`, is what
+   lets `qa-scenario-writer` judge per-AC coverage from existing test METHOD names
+   before opening any whole file. When the mutation consent from step 2 resolved
+   yes, ALSO include `scripts/worktree.ps1 -Ensure` (checkout is I/O — it doesn't
+   contend with the test run) and dispatch `qa-mutation-author` in the same batch:
+   design + injection overlap step 3 freely; only the semantic-mutant DRIVER waits
+   for step 3 to finish (CPU-heavy phases never overlap).
+   - `qa-scenario-writer`'s dispatch prompt carries the SAME inline evidence pack
+     as `qa-analyst` (AC text verbatim, diff hunks in full, intake's citations,
+     adapter-profile summary, workspace dir path) — never a re-read of
+     `run-manifest.json`/`diff-set.json`/`adapter-profiles.json`. It reads
+     `test-inventory.json` itself (mechanical output, not something to inline)
+     before any product-repo source file, and opens an existing test file only
+     to extend it or resolve a genuine name-level ambiguity — never "for
+     context". It never reads step 3's output (`test-results.json`,
+     `diff-coverage.json`) — nothing here depends on it, so it's always safe to
+     start immediately. It renders into `<workspaceDir>/generated/` (staging —
+     worktree.ps1 materializes the files into both worktrees), so it doesn't
+     depend on any worktree existing.
+   - `qa-mutation-author`'s dispatch prompt ALSO carries the same inline pack
+     (ACs, diff hunks, citations) plus the worktree dir's absolute path (where
+     it edits) — never a re-read of `run-manifest.json`/`diff-set.json`. It
+     designs **3–5** mutants now (down from the old 3–8 — prefer fewer,
+     higher-value ones), reading product-repo source only for injection
+     mechanics (matching an existing pattern it must reproduce exactly), never
+     for general context the pack already gives it.
+   - `qa-analyst`'s dispatch prompt MUST carry an inline evidence pack, not just a
+     workspace-dir path — this is what keeps it inside its ~15-tool-call budget
+     (verified live: without this it took 437s, the single largest phase, largely
+     re-reading things the orchestrator already had in-conversation). Build the
+     pack from what you already hold at this point in the run: the AC text
+     verbatim (from step 2's intake brief), the diff hunks in full (from
+     `diff-set.json` — small and pre-scoped, paste them, don't point at the file),
+     intake's already-cited file:line evidence, an adapter-profile one-line
+     summary (framework/runner/dialect), and the workspace dir's absolute path.
+     `qa-analyst` still reads `diff-coverage.json`/`test-results.json` itself
+     (only for its Gap Lattice and flaky sections — it's briefed to do its other
+     sections first and treat those two files as "not ready yet," not an error,
+     if missing when it starts) plus `mutation-report.json`/`impact-index.json`/
+     `testomat-candidates.json`/`manual-test-candidates.json` when present —
+     everything else (`run-manifest.json`, `diff-set.json`, `adapter-profiles.json`,
+     `jira-ticket.json`) comes from the inline pack, never a disk re-read. Its
+     output is a file, `<workspaceDir>/analyst-brief.json` (shape in
      `scripts/CONTRACTS.md`), not chat prose — its final message is a one-line
      count summary only. It does NOT interpret `contract-report.json` or rank a
      "most likely to catch a regression" list — both are fully mechanical and
@@ -191,20 +229,29 @@ intent, then map onto these four slots:
    - Both agents reuse any file:line/key evidence intake already carried forward
      from the AC/bug-report text instead of re-tracing it from zero — if you notice
      both agents independently grepping the same coupling on a run, that's a sign
-     step 2 should have carried the evidence forward instead.
-   - If step 2b ran, point `qa-analyst` at `impact-index.json` +
-     `testomat-candidates.json` too — cross-repo fan-in is part of its
-     regression-risk brief. If step 2c ran, also point it at
-     `manual-test-candidates.json` — manual-test interpretation is part of the same
-     brief.
+     step 2 should have carried the evidence forward instead. `qa-analyst` in
+     particular takes intake's citations as verified by default — it spends a
+     read re-confirming one only when a specific finding depends on that exact
+     citation being accurate, never as a blanket double-check.
+   - If step 2b ran, add `impact-index.json` + `testomat-candidates.json` to
+     `qa-analyst`'s read list too — cross-repo fan-in is part of its
+     regression-risk brief. If step 2c ran, also add `manual-test-candidates.json`
+     — manual-test interpretation is part of the same brief.
 5. **Mutation** (consent already answered in step 2; the auto-skip judgment and a
    `SKIPPED — consent denied` line still apply; skipped under `--quick`) — after
    step 3 has finished (the driver and Stryker are CPU-heavy): design + injection
    may already be done from step 4's early dispatch →
-   `scripts/semantic-mutant-driver.ps1` → **`scripts/worktree.ps1 -Ensure` again**
-   (cheap reuse reset — removes the AGENTQ_MUTANT switches; generated tests
-   re-materialize from staging; stryker-run refuses to start while switches
-   remain) → `scripts/stryker-run.ps1` (**must be a background shell job, not a
+   `scripts/semantic-mutant-driver.ps1`. In the SAME tool-call batch as the next
+   two steps below (`worktree.ps1 -Ensure` + kicking off Stryker), dispatch
+   `qa-mutation-author` again to draft `suggestedFix` entries for whichever of
+   ITS OWN mutants the driver just reported as survived — this overlaps
+   Stryker's own multi-minute run instead of running serially after it (this
+   was ad hoc the first time it happened; it's the rule now, since suggestedFix
+   drafting is model/file work with nothing to wait on once the driver's
+   results exist). Then **`scripts/worktree.ps1 -Ensure` again** (cheap reuse
+   reset — removes the AGENTQ_MUTANT switches; generated tests re-materialize
+   from staging; stryker-run refuses to start while switches remain) →
+   `scripts/stryker-run.ps1` (**must be a background shell job, not a
    foreground command** — this phase is legitimately multi-minute; a short
    foreground timeout sends SIGTERM before the script's own anti-hang valve
    fires, yielding no mutation results and potentially orphaning

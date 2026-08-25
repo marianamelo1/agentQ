@@ -491,8 +491,9 @@ via `git apply`, untracked files copied in — usually already ensured back in P
 4's dispatch batch). Design + injection may already have happened during Phase 4
 (overlapped model/file work); the CPU-heavy steps below start only after Phase 2's
 run has finished.
-1. **AI business-rule tier first** (~30–45 s): qa-mutation-author designs 3–8
-   semantic mutants (numeric/decimal literals, enum members, date arithmetic,
+1. **AI business-rule tier first** (~30–45 s): qa-mutation-author designs 3–5
+   semantic mutants — prefer fewer, higher-value over reaching for the old
+   upper end (numeric/decimal literals, enum members, date arithmetic,
    multi-site rule rewrites — the mutations Stryker verifiably cannot express; only
    where mechanical mutants all die or none applies). All injected at once behind
    `AGENTQ_MUTANT` env-var switches (a `const` is promoted to a static property in
@@ -782,7 +783,7 @@ everything the main report dropped, at full rigor:
 | `qa-intake` | Diff classification, adapter profiles, Jira ACs + Figma links, bootability/outbound/contract probes | every run |
 | `qa-analyst` | Regression risk, AC alignment, gap lattice, static flaky-smell detection, Socratic questions, manual-test-candidate framing — from script JSON only; writes `analyst-brief.json`, not prose (contract phrasing and the "most likely to catch a regression" list are fully mechanical, rendered by `render-evidence.ps1`) | every run |
 | `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile | cache miss |
-| `qa-mutation-author` | The 3–8 business-rule mutants | mutation consented |
+| `qa-mutation-author` | The 3–5 business-rule mutants | mutation consented |
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
 | `qa-report-synthesizer` | The main report only — selects/ranks findings into `report-selection.json` | every run |
 

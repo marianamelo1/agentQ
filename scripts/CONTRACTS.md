@@ -155,9 +155,17 @@ One entry per affected **test project**:
       "placementAllowedFolders": ["Domain"],   // payroll test_placement allow-list; empty = unrestricted
       "sutProjects": ["apps/backend/src/payroll/Visma.Payroll.Domain/Visma.Payroll.Domain.csproj"]
     }
-  ]
+  ],
+  "fromCache": true   // present + true only when scripts/adapter-cache.ps1 -Probe served this file; absent on a fresh derivation
 }
 ```
+`fromCache` is never written by qa-intake's own derivation — only
+`adapter-cache.ps1 -Probe` adds it, and only when copying a cache hit into
+place. Consumers (`run-tests.ps1`, `stryker-run.ps1`) already ignore unknown
+top-level keys, so its presence is purely informational (e.g. for a future
+report line noting intake was cache-accelerated) — it changes nothing about how
+the `projects[]` array itself is used.
+
 `suiteScope: "solution-wide"` marks architecture/static-analysis suites whose tests
 scan the entire solution rather than specific SUT code (e.g. ContainerIntegrity /
 convention / arch-rule projects — qa-intake sets it). `run-tests.ps1` never runs
@@ -185,6 +193,75 @@ deliberately does not pre-install it (most machines never reach this code
 path). See `calibration.json` below for the
 `coverletConsoleWorks` capability key this escalation self-records, and
 `test-results.json`'s `coverageNote` for how a run states which path it took.
+
+### workspace/<repoSlug>/adapter-profile-cache/  (adapter-cache.ps1)
+Repo-level, branch-agnostic cache for `adapter-profiles.json` — same placement
+convention as `.../mutation-cache/`, and the same "only a complete, trustworthy
+entry is ever stored or trusted" discipline. Adapter-profile derivation is a
+deterministic function of two things only: which files the diff touches, and
+the repo's own structural config (`global.json`, the CI workflow files that
+define the test-project inventory / placement allow-list) — never what changed
+*inside* those files. So the cache key is `SHA256(sorted diff-set.json
+files[].path+status ∪ untracked paths, each tagged; plus the content hash of
+`global.json` and of whichever of `.github/workflows/{pr-build-backend,
+unit_tests,integration_tests}.yml` exist in this repo)`, truncated to 32 hex
+chars — deliberately NOT a hash of "the affected test projects' `.csproj`
+files", because determining which projects are affected IS what derivation
+computes; keying on it would need the answer before the question.
+```
+adapter-profile-cache/
+  <key>.json        # the cached adapter-profiles.json verbatim (no fromCache field - see below)
+  <key>.meta.json    # { createdAt, repoSlug, branch, key } - debugging only, never read back
+```
+`scripts/adapter-cache.ps1 -Manifest <path> -Probe` (qa-intake task 3, before
+any derivation work): computes the key from the workspace's already-written
+`diff-set.json` (the orchestrator pre-runs `worktree.ps1 -DiffSet` in Phase 0
+specifically so this can happen immediately); a hit copies `<key>.json` to
+`<workspaceDir>/adapter-profiles.json` with `fromCache: true` added and prints
+one summary line — qa-intake skips derivation entirely for that run. A miss
+(no cached entry, or an unreadable/corrupt one — never trust a husk) changes
+nothing on disk; qa-intake derives exactly as it always has.
+`-Store` (after a fresh derivation): computes the same key, copies the
+just-written `adapter-profiles.json` into the cache (with any `fromCache` field
+stripped — the cache holds the canonical derived form only) plus the meta
+sidecar. Never called on a cache-hit run (nothing new was derived to store).
+Two different diffs that happen to touch the identical file-path set, on
+unchanged repo structure, correctly and safely share a cache entry — the
+derivation logic reads nothing else, so its output is provably identical
+either way; this is a stronger guarantee than "close enough", not a shortcut.
+
+## test-inventory.json  (test-inventory.ps1 — Phase 4, dispatched alongside qa-analyst/qa-scenario-writer)
+Mechanical, near-instant regex scan — never builds, boots, or executes anything.
+For every SUT file the diff changed, finds the EXISTING test file that already
+covers it (same `<Base>Tests`/`<Base>Test` naming convention `run-tests.ps1`'s
+`Get-AffectedTestClasses` uses for its filters, but resolving to the physical
+file here, not just a filter string) and regex-extracts its test METHOD names —
+so `qa-scenario-writer` can judge per-AC coverage from names alone, opening the
+actual file only for sections it will extend or where names are ambiguous. A
+changed file that is itself already under the test project's own directory is
+inventoried directly (it already IS a test file). `.NET`: xUnit/NUnit attributes
+(`[Fact]`/`[Theory]`/`[Test]`/`[TestCase]`, including stacked attribute lines
+before the method signature). JS/TS: `it(...)`/`test(...)` string titles.
+```json
+{
+  "files": [
+    {
+      "sutFile": "apps/backend/src/payroll/Visma.Payroll.Infrastructure/Payroll/Decorators/CachedPayrollItemTypeRepository.cs",
+      "testFile": "apps/backend/tests/payroll/Visma.Payroll.Infrastructure.UnitTests/Infrastructure/Payroll/Decorators/CachedPayrollItemTypeRepositoryTests.cs",
+      "testClass": "CachedPayrollItemTypeRepositoryTests",
+      "framework": "xunit",
+      "methods": ["GetIncludingHiddenAsync_WhenL1Hit_TracksL1HitResultTag", "…"]
+    }
+  ],
+  "unmatchedSutFiles": ["apps/backend/src/payroll/.../ServiceCollectionExtensions.cs"]
+}
+```
+`sutFile` is `null` for an entry whose test file was matched directly (the
+changed file already lived under the test project's tree, not reverse-derived
+from a SUT file). `unmatchedSutFiles` is not a failure — a SUT file with no
+existing dedicated test class (a DI-registration one-liner, a dead-code
+deletion) is a normal, expected outcome, not an error; `qa-scenario-writer`
+treats it the same as "no prior coverage to check against."
 
 ## test-results.json  (run-tests.ps1)
 ```json
