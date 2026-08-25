@@ -182,7 +182,12 @@ intent, then map onto these four slots:
    - `qa-analyst` reads `diff-coverage.json`/`test-results.json` only for its Gap
      Lattice and flaky sections — it's briefed to do its other sections first and
      treat those two files as "not ready yet," not an error, if missing when it
-     starts.
+     starts. Its output is a file, `<workspaceDir>/analyst-brief.json` (shape in
+     `scripts/CONTRACTS.md`), not chat prose — its final message is a one-line
+     count summary only. It does NOT interpret `contract-report.json` or rank a
+     "most likely to catch a regression" list — both are fully mechanical and
+     `scripts/render-evidence.ps1` renders them directly from
+     `contract-report.json`/`risk-score.json`.
    - Both agents reuse any file:line/key evidence intake already carried forward
      from the AC/bug-report text instead of re-tracing it from zero — if you notice
      both agents independently grepping the same coupling on a run, that's a sign
@@ -221,17 +226,37 @@ intent, then map onto these four slots:
    Frontend branches: run cached E2E specs
    (`npx playwright test --grep @agentq`); kick off `qa-e2e-author` in the
    background for new scenarios and (if a Figma link exists) design conformance.
-8. **Report** — delegate `qa-report-synthesizer` with the workspace dir. It
-   writes TWO files under `reports/`: the max-2-page plain-language main report
-   and its `-evidence.md` technical companion (which renders the Impact matrix
-   row + impact map from `impact-index.json` / `testomat-candidates.json`).
-   Re-save both as UTF-8 with BOM (PowerShell `[IO.File]::WriteAllText` with
-   `UTF8Encoding($true)`). **Do NOT restate the verdict or findings in chat** —
-   the closing message is a clickable link to the main report file and nothing
-   of its content (the report is the single source of the verdict; a chat copy
-   drifts). Then ask which generated tests to keep; on explicit yes apply them
-   to the product repo as a reviewed diff (placement per adapter profile; the
-   canonical file content lives in `<workspaceDir>/generated/`).
+8. **Report — two writers, in order** (fixes both the duplicated Run
+   summary/Time ledger tables and the report phase's own time being
+   unmeasurable that this used to produce):
+   1. Dispatch `qa-report-synthesizer` — give it `analyst-brief.json`'s path
+      plus, INLINE in the prompt (it never reads these artifacts itself): the
+      🧭 one-sentence branch summary, ≤3 manual-test-candidate titles (if any),
+      any failed test's name + `rerunCommand` (from `test-results.json`'s
+      `flaky.mightBeFlaky`, which you already saw in step 3's own summary
+      line), and the keep-list — one plain one-liner per generated
+      test/mutation-suggestedFix, in the fixed order Unit → Mutation →
+      Component → API → E2E (you already have these from steps 4/5's agent
+      results). It writes the main report + `report-selection.json` (which
+      ≤3 finding/question ids it used, by `analyst-brief.json`'s own ids).
+      Time this dispatch.
+   2. Append `{ name: "report", actor: "qa-report-synthesizer", seconds:
+      <measured>, outcome: "RAN" }` to `time-ledger.json` and update
+      `totalSeconds` — this is the one phase that used to be unmeasurable
+      because it lived only inside the file it was writing.
+   3. Run `scripts/render-evidence.ps1 -Manifest <path> -ReportPath <the main
+      report path>` — deterministic, zero model calls, produces the
+      `-evidence.md` companion straight from the workspace artifacts +
+      `analyst-brief.json` + `report-selection.json` (which now includes the
+      report phase's real seconds, since step 2 ran first).
+   Re-save BOTH files as UTF-8 with BOM (PowerShell `[IO.File]::WriteAllText`
+   with `UTF8Encoding($true)`). **Do NOT restate the verdict or findings in
+   chat** — the closing message is a clickable link to the main report file
+   and nothing of its content (the report is the single source of the
+   verdict; a chat copy drifts). Then ask which generated tests to keep; on
+   explicit yes apply them to the product repo as a reviewed diff (placement
+   per adapter profile; the canonical file content lives in
+   `<workspaceDir>/generated/`).
 9. **Cleanup verify** — `scripts/worktree.ps1 -Verify`. Confirm product repo
    untouched.
 

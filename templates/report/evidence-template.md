@@ -1,6 +1,8 @@
 <!--
   agentQ EVIDENCE file skeleton — the technical companion to the main report,
-  filled by the qa-report-synthesizer agent. All rigor lives here:
+  rendered DETERMINISTICALLY by scripts/render-evidence.ps1 (not an LLM) from
+  the workspace JSON artifacts + analyst-brief.json + report-selection.json.
+  All rigor lives here:
     - Numbers come from the workspace JSON artifacts VERBATIM (shapes in
       scripts/CONTRACTS.md) — never recomputed, re-rounded, or inferred.
     - A skipped/degraded row can never read as a pass.
@@ -26,26 +28,50 @@ the plain-language summary live there.
      omit ones skipped this run (qa-scenario-writer on a cache hit,
      qa-e2e-author on a backend-only diff). The "Actor" column names whichever
      agent(s) and/or script(s) did that phase's work — this is what makes it
-     honest that most wall-clock is deterministic scripts, not model calls. -->
+     honest that most wall-clock is deterministic scripts, not model calls.
+     ONE table carries both actor and outcome per phase — there is no separate
+     "Time ledger" section below. The "report" phase's row exists because the
+     orchestrator appends it (with the real measured seconds) AFTER
+     qa-report-synthesizer returns and BEFORE this file is rendered — the one
+     phase that used to be unmeasurable because it lived only in here. -->
 
 **Agents called:** {{agentsCalled joined by " · ", or "— none (all cached / skipped) —"}}
 
-| Phase | Actor | Seconds |
-|---|---|---|
-| {{phase name}} | {{actor}} | {{seconds}} |
+| Phase | Actor | Seconds | Outcome |
+|---|---|---|---|
+| {{phase name}} | {{actor}} | {{seconds}} | {{RAN \| DEGRADED — … \| SKIPPED — …}} |
 
 **Total wall-clock: {{totalSeconds, formatted e.g. "3m 42s"}}** (phases marked
 "overlapped" run concurrently — this is measured elapsed time, not the column sum)
 
 ## Finding detail
 
-<!-- One subsection per main-report finding, same numbering and title: the
-     file:line evidence, mutant ids, coverage numbers, and test names behind
-     the plain sentences the developer read up front. -->
+<!-- One subsection per main-report finding, in the exact ids/order
+     report-selection.json's selectedFindingIds gives — pulled verbatim from
+     analyst-brief.json's findings[] (file/line/detail): the evidence behind
+     the plain sentences the developer read up front. Empty selection (a
+     clean run) → "No findings rose to the main report this run." -->
 
-### 1. {{main-report finding title}}
+### 1. {{finding title, from analyst-brief.json}}
 
-{{file:line evidence, mutant ids, coverage numbers, covering/missing tests}}
+{{file:line evidence + detail, verbatim from analyst-brief.json}}
+
+## Acceptance criteria
+
+<!-- ALL of analyst-brief.json's acAlignment[], one row per AC, in ticket
+     order — the single place every AC grade lives (the per-level sections
+     below no longer repeat this table; they may still name an AC in prose
+     when a scenario/mutant closes exactly that gap). Evidence-qualified
+     vocabulary verbatim, no other forms:
+     MET — verified by executed scenario X (failed on base) ≠
+     MET — verified (vacuity: static only) ≠
+     MET — verified (vacuity: does not compile on base — references
+     branch-new <symbol>) ≠ APPEARS MET — static reading only ≠
+     NOT MET — <observed vs expected> ≠ UNVERIFIABLE — <reason>. -->
+
+| AC | Grade | Evidence |
+|---|---|---|
+| {{ac}} | {{grade}} | {{evidence}} |
 
 ## Capability matrix
 
@@ -81,27 +107,32 @@ the plain-language summary live there.
 ## Manual testing
 
 <!-- Only when Phase 1c ran (toggles.skipManualTestAnalysis: false, the
-     default) — independent of the Impact map above. From
-     manual-test-candidates.json: ≤5 candidates, diff-seed matches ranked above
-     ticket-link matches, "+N more" pointing at the artifact. Always
-     *candidates (keyword/ticket match)* — never "you must test this". Toggled
-     off or no Testomatio MCP → state that plainly ("SKIPPED — <why>"), never
-     omit the section silently. The main report shows ≤3 of these as
-     "🖐️ Worth checking by hand" when any exist. -->
+     default) — independent of the Impact map above. IDs/titles/matchedBy from
+     manual-test-candidates.json, the one-sentence "why it's worth running now"
+     framing from analyst-brief.json's manualTesting[] (same id): ≤5
+     candidates, diff-seed matches ranked above ticket-link matches, "+N more"
+     pointing at the artifact. Always *candidates (keyword/ticket match)* —
+     never "you must test this". Toggled off or no Testomatio MCP → state that
+     plainly ("SKIPPED — <why>"), never omit the section silently. The main
+     report shows ≤3 of these as "🖐️ Worth checking by hand" when any exist. -->
 
 {{manual test candidates, or "SKIPPED — <why>"}}
 
 ## Unit level
 
-<!-- From test-results.json + diff-coverage.json + the qa-analyst brief.
-     Diff coverage phrasing is mandatory: "Of the lines you changed, X% ran
-     under tests related to this branch (branch coverage Y%)". If
-     diff-coverage.json has refused:true — state the refusal reason, no number.
+<!-- From test-results.json + diff-coverage.json (mechanical) +
+     analyst-brief.json's gapLattice (judgment: missing test / missing case /
+     assertion too weak). Diff coverage phrasing is mandatory: "Of the lines
+     you changed, X% ran under tests related to this branch (branch coverage
+     Y%)". If diff-coverage.json has refused:true — state the refusal reason,
+     no number.
      Test lists: three named lists ONLY — "most likely to catch a regression
-     here" / "flaky-risk smells (static)" / "might be flaky (failed this run —
-     rerun command provided; confirm outside agentQ)". Each might-be-flaky entry
-     quotes its rerunCommand from test-results.json VERBATIM so the developer
-     can copy-paste it. Never the word "riskiest".
+     here" (risk-score.json's own topTests, verbatim) / "flaky-risk smells
+     (static)" (analyst-brief.json's flakyInterpretation.staticSmells) /
+     "might be flaky (failed this run — rerun command provided; confirm
+     outside agentQ)" (test-results.json's flaky.mightBeFlaky). Each
+     might-be-flaky entry quotes its rerunCommand from test-results.json
+     VERBATIM so the developer can copy-paste it. Never the word "riskiest".
      If any scenarios/*.json this run is level:"unit", end this section with:
      "🧪 Generated: `{{id}}` — {{title}}. See 'Generated scenarios' below."
      (one line per unit-level scenario). Omit the line entirely if none. -->
@@ -133,29 +164,28 @@ the plain-language summary live there.
      EXECUTED — PASSED | EXECUTED — FAILED (finding) |
      GENERATED, COMPILES, NOT EXECUTED — <reason> — run: <command> |
      GENERATED, NOT EXECUTED — <reason>.
-     AC claims carry their evidence source:
-     MET — verified by executed scenario X (failed on base) ≠
-     MET — verified (vacuity: static only) ≠ APPEARS MET — static reading only ≠
-     NOT MET — <observed vs expected> ≠ UNVERIFIABLE — <reason>.
+     AC grades live in the Acceptance criteria section above — cross-reference
+     an AC here only when naming which scenario closes it.
      If any scenarios/*.json this run is level:"component", end this section
      with one "🧪 Generated: `{{id}}` — {{title}}. See 'Generated scenarios'
      below." line per scenario. Omit if none. -->
 
-{{component findings + AC claims}}
+{{component findings}}
 
 ## API + Contract level
 
-<!-- Contract phrasing (from contract-report.json):
+<!-- Contract phrasing (from contract-report.json, fully mechanical):
      ERR  → "breaking change to the documented API contract (rule <ruleId>) —
              any consumer relying on this shape will break"
      WARN → "potentially breaking — needs human judgment"
      Only Pact findings may name a consumer. Unknown provider states are
-     "unverifiable, not failed".
+     "unverifiable, not failed". AC grades live in the Acceptance criteria
+     section above.
      If any scenarios/*.json this run is level:"api", end this section with one
      "🧪 Generated: `{{id}}` — {{title}}. See 'Generated scenarios' below."
      line per scenario. Omit if none. -->
 
-{{api + contract findings + AC claims}}
+{{api + contract findings}}
 
 ## E2E {{+ Design conformance — frontend branches only}}
 
@@ -190,11 +220,14 @@ the plain-language summary live there.
 
 ## Questions worth answering before the PR
 
-<!-- The qa-analyst's Socratic questions, VERBATIM — ≤5, each leading with the
-     real business/user scenario, the file:line evidence cited as why it's
-     worth asking, each answerable by one nameable test. The main report shows
-     ≤3 of these in plain language. If none: "None — the existing tests
-     already answer the questions this diff raises." -->
+<!-- analyst-brief.json's socraticQuestions[], VERBATIM and IN FULL (≤5 —
+     not just the ones report-selection.json picked for the main report),
+     each leading with the real business/user scenario, the file:line
+     evidence cited as why it's worth asking, each answerable by one
+     nameable test. The main report shows ≤3 of these (per
+     report-selection.json's questionIds) in plain language. If none:
+     "None — the existing tests already answer the questions this diff
+     raises." -->
 
 {{socratic questions}}
 
@@ -212,15 +245,6 @@ the plain-language summary live there.
 Score: **{{score}}** → band **{{band}}** · confidence **{{confidence}}**
 
 Methodology: heuristic scored from this diff only; not calibrated against CI history.
-
-## Time ledger
-
-<!-- Same phases as the Run summary above, this time with per-phase outcome
-     instead of actor — the two tables are complementary, not duplicates. -->
-
-| Phase | Seconds | Outcome |
-|---|---|---|
-| {{name}} | {{seconds}} | {{RAN \| DEGRADED — … \| SKIPPED — …}} |
 
 ## Capture provenance
 

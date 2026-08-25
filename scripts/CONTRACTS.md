@@ -383,6 +383,86 @@ flip-to-base check, the same way it appends to `time-ledger.json`. `risk-score.p
 reads them (see `testToSourceBalance` below) — never invent a value here to make a
 number look better; an untouched `null` correctly reads as "not yet executed."
 
+## analyst-brief.json  (qa-analyst — Phase 4 judgment output)
+Written by `qa-analyst` into the workspace dir alongside its (now short) chat
+summary. WHY a file, not just a chat message: everything downstream —
+`scripts/render-evidence.ps1` (deterministic) and `qa-report-synthesizer` (the
+2-page main report) — needs this content as data, not prose it would have to
+re-parse; writing it once here is also what let the analyst's own final chat
+message shrink to a one-line summary instead of re-stating every section.
+Sections that are ALREADY fully mechanical from other artifacts are
+deliberately NOT duplicated here: contract phrasing renders straight from
+`contract-report.json` (ERR/WARN rules), the "most likely to catch a
+regression" test list is `risk-score.json`'s own `topTests`, and
+`flaky.mightBeFlaky` (with its `rerunCommand`s) renders straight from
+`test-results.json` — `analyst-brief.json` carries only the genuine judgment:
+regression-risk findings, AC grades, the gap lattice, static flaky-smell greps,
+Socratic questions, and manual-test-candidate framing.
+```json
+{
+  "findings": [
+    {
+      "id": 1,
+      "title": "…",
+      "severity": "High" | "Med" | "Low",
+      "file": "src/payroll/VatCalculator.cs", "line": 47,
+      "detail": "2-4 sentences: why it bites, in feature/consequence terms",
+      "impactNote": "optional — cite impact-index.json/testomat-candidates.json matches as candidates when they weight this finding's severity, never as verified impact"
+    }
+  ],
+  "acAlignment": [
+    { "ac": "AC-1", "text": "short paraphrase of the AC", "grade": "MET — verified by executed scenario X (failed on base)", "evidence": "file:line / test name / reasoning" }
+  ],
+  "gapLattice": [
+    { "kind": "missing test" | "missing case" | "assertion too weak", "file": "…", "line": 47, "detail": "…", "coveringTest": "name, or null for 'missing test'" }
+  ],
+  "flakyInterpretation": {
+    "staticSmells": [ { "file": "…", "line": 12, "smell": "DateTime.Now" | "unseeded Random" | "Thread.Sleep" | "mutable static" | "Parallelizable+shared state", "note": "…" } ]
+  },
+  "socraticQuestions": [ { "id": 1, "question": "…", "evidence": "file:line" } ],
+  "manualTesting": [ { "id": "de8c0276", "title": "…", "matchedBy": "diff-seed" | "ticket-link", "why": "the real scenario this candidate covers, in one sentence" } ],
+  "summaryCounts": {
+    "acMet": 7, "acTotal": 11, "acVerifiedByTest": 7, "acStaticOnly": 3, "acUnverifiable": 1,
+    "existingTestsPassed": 40, "existingTestsTotal": 40,
+    "crossRepoFanIn": "one-line summary, e.g. 'no other repo references this change'"
+  }
+}
+```
+`findings[].id` and `socraticQuestions[].id` are stable small integers (1, 2,
+3, …) in the analyst's own priority order — `report-selection.json` (below)
+references them by id, and `render-evidence.ps1`'s "Finding detail" section
+numbers itself from whichever ids `report-selection.json` picked, so the main
+report and the evidence file always share one numbering, never two
+independently-assigned ones. `gapLattice` entries that don't rise to a
+top-3 finding still feed the evidence file's per-level Gap Lattice text —
+suppress `NoCoverage` mutants before this (they're `test-results.json`/
+coverage findings, not mutation findings — one tier per changed line).
+`manualTesting` is populated only when `manual-test-candidates.json` exists
+this run — same file, now with the analyst's one-sentence framing attached
+per candidate instead of a bare title.
+
+## report-selection.json  (qa-report-synthesizer — written to the WORKSPACE dir,
+## next to analyst-brief.json — NOT into reports/, which holds only the two
+## human-facing .md files)
+Written alongside the JSON artifacts — the ONLY judgment `render-evidence.ps1`
+needs from the synthesizer, so the evidence file's "Finding detail" section
+uses the exact same ≤3 findings, in the exact same order and numbering, as the
+main report's "❌ N things to fix first" (never a second, independently-ranked
+list).
+```json
+{
+  "resultIcon": "🟢" | "🔴",
+  "resultText": "Ready to open" | "Not ready yet",
+  "selectedFindingIds": [3, 1, 5],
+  "questionIds": [1, 2, 4]
+}
+```
+`selectedFindingIds`/`questionIds` reference `analyst-brief.json`'s
+`findings[].id` / `socraticQuestions[].id` verbatim — never a new id space.
+Empty `selectedFindingIds` on a clean run is valid (main report shows
+"✅ Nothing blocking found"; the evidence file's Finding detail section
+renders "No findings rose to the main report this run.").
+
 ## contract-report.json  (contract-check.ps1)
 ```json
 {
@@ -477,8 +557,20 @@ qa-scenario-writer (overlapped)"`) — this is what lets the report show, honest
 that most wall-clock time is deterministic scripts, not model calls. `totalSeconds`
 is measured wall-clock for the whole run, not the sum of the `phases` column (phases
 that overlap by design — Phase 4 with Phases 2–3, model work with CPU work — make
-the sum larger than reality). `qa-report-synthesizer` reads all three fields
-verbatim; it never recomputes a total or reclassifies who ran what.
+the sum larger than reality).
+
+**The "report" phase is appended AFTER `qa-report-synthesizer` returns, BEFORE
+`scripts/render-evidence.ps1` runs** — the one phase whose own duration would
+otherwise be unmeasurable, since it used to live only inside the evidence file
+that same agent was writing. The orchestrator times the dispatch call, appends
+`{ "name": "report", "actor": "qa-report-synthesizer", "seconds": <measured>,
+"outcome": "RAN" }` and updates `totalSeconds`, THEN runs `render-evidence.ps1`
+— so the evidence file's phase table (which `render-evidence.ps1` reads this
+same file to build) includes its own report-writing cost instead of silently
+omitting the largest phase. `render-evidence.ps1` reads `agentsCalled`/
+`phases`/`totalSeconds` verbatim into ONE table (`Phase | Actor | Seconds |
+Outcome`) — there is no longer a separate hand-transcribed "Run summary" table
+duplicating the same phase/seconds columns with a different third column.
 
 ## impact-index.json  (impact-index.ps1 — Phase 1b of every /qa-review + the standalone /qa-impact)
 Static blast-radius index. Never builds, boots, or executes anything; read-only scan

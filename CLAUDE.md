@@ -604,28 +604,46 @@ text / layout / tokens / designed states. Findings: `DEVIATES — objective` (si
 side evidence) vs `NEEDS HUMAN JUDGMENT` (never asserted as a defect). Scoped to the
 linked frames only. No link → `SKIPPED — no design linked in ticket`.
 
-### Phase 8 — Report (agent: qa-report-synthesizer)
-Writes **two files** (all binding rules in Reporting below):
-- **Main report** — `reports/<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md`:
-  max 2 pages, plain language for a reader with no QA background and no
-  full-application context, feature/user-flow framing (never file:line), the
-  fixed icon set. Header line with result → what the branch does → ≤3 findings
-  (each with a 🛠️ Do-this action) → ✅ What's good bullets (first bullet: were
-  the ticket's acceptance criteria met — always, evidence-qualified) → ⚖️ merge risk in one
-  plain sentence → ❓ ≤3 questions → 🖐️ manual-check suggestions (when any) →
-  🔍 what-was-checked table → 🧪 keep-these-tests list → 📄 evidence-file link.
-- **Evidence file** — same name + `-evidence.md`: everything technical — run
-  summary (agents actually called, a Phase/Actor/Seconds table, total
-  wall-clock — all verbatim from `time-ledger.json`, which the orchestrator
-  appends to as each phase completes), per-finding file:line detail, capability
-  matrix, impact map + manual-testing detail, per-level sections in the
-  evidence-qualified vocabulary, the generated-scenarios table, the full
-  Socratic questions, the risk-signal ledger, the time ledger with outcomes,
-  capture provenance, and the command log (+ evidence dir).
-After the agent writes both, the orchestrator re-saves them as UTF-8 **with BOM**
-(one PowerShell `[IO.File]::WriteAllText` with `UTF8Encoding($true)`) so Windows
-editors render the icons and dashes correctly. Append score→outcome to
-`workspace/<repo>/history.jsonl`.
+### Phase 8 — Report (agent: qa-report-synthesizer, then script: render-evidence.ps1)
+Two writers, in order, not one agent writing both files (all binding rules in
+Reporting below):
+1. **`qa-report-synthesizer` writes the main report** —
+   `reports/<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md`: max 2 pages,
+   plain language for a reader with no QA background and no full-application
+   context, feature/user-flow framing (never file:line), the fixed icon set.
+   Header line with result → what the branch does → ≤3 findings (each with a
+   🛠️ Do-this action) → ✅ What's good bullets (first bullet: were the
+   ticket's acceptance criteria met — always, evidence-qualified) → ⚖️ merge
+   risk in one plain sentence → ❓ ≤3 questions → 🖐️ manual-check suggestions
+   (when any) → 🔍 what-was-checked table → 🧪 keep-these-tests list →
+   📄 evidence-file link. Its inputs are `analyst-brief.json`,
+   `risk-score.json`, `jira-ticket.json`, plus inline context the orchestrator
+   passes in the dispatch prompt (branch summary, manual-test titles, failed
+   tests, the keep-list) — it never reads raw artifacts like
+   `test-results.json` directly. It also writes `report-selection.json`
+   (shape in `scripts/CONTRACTS.md`): which ≤3 findings/questions (by
+   `analyst-brief.json`'s own ids) it used, so the evidence file shares the
+   exact same numbering.
+2. The orchestrator times step 1's dispatch and appends
+   `{ name: "report", actor: "qa-report-synthesizer", seconds: <measured>,
+   outcome: "RAN" }` to `time-ledger.json` — the one phase that used to be
+   unmeasurable because it lived only inside the file it was writing.
+3. **`scripts/render-evidence.ps1` writes the evidence file** — same name +
+   `-evidence.md`, deterministically, zero model calls: ONE merged
+   Phase/Actor/Seconds/Outcome table (from `time-ledger.json`, now including
+   the report phase from step 2 — no more separate, duplicated "Run summary"
+   and "Time ledger" tables), per-finding file:line detail (from
+   `analyst-brief.json` + `report-selection.json`, exact same numbering as the
+   main report), capability matrix, impact map + manual-testing detail,
+   per-level sections (contract ERR/WARN phrasing and the "most likely to
+   catch a regression" list render straight from `contract-report.json`/
+   `risk-score.json` — no agent judgment needed for either), the
+   generated-scenarios table, the full Socratic questions, the risk-signal
+   ledger, capture provenance, and the command log.
+After both writers finish, the orchestrator re-saves both files as UTF-8
+**with BOM** (one PowerShell `[IO.File]::WriteAllText` with
+`UTF8Encoding($true)`) so Windows editors render the icons and dashes
+correctly. Append score→outcome to `workspace/<repo>/history.jsonl`.
 **Chat delivery rule: never restate the verdict or findings in chat.** The
 report file is the single place the verdict lives — the closing chat message is
 a clickable link to the main report (evidence file linked inside it), plus only
@@ -701,10 +719,13 @@ cut, don't compress; overflow goes to the evidence file):
   why>` — never a pass, never an omitted row. Merge risk band verbatim from
   `risk-score.json`; never a "probability of passing CI".
 
-**Evidence file** (`templates/report/evidence-template.md`) holds everything the
-main report dropped, at full rigor:
-- Run summary + per-finding technical detail (file:line, mutant ids, coverage
-  numbers, test names — one subsection per main-report finding).
+**Evidence file** (`templates/report/evidence-template.md`, rendered
+deterministically by `scripts/render-evidence.ps1` — zero model calls) holds
+everything the main report dropped, at full rigor:
+- ONE merged run/phase table (Phase/Actor/Seconds/Outcome — no separate,
+  duplicated "Run summary" and "Time ledger" sections) + per-finding technical
+  detail (file:line, mutant ids, coverage numbers, test names — one subsection
+  per main-report finding, from `analyst-brief.json` + `report-selection.json`).
 - Capability matrix: one row per level **plus one Impact row** (cross-repo /
   UI-automation / Testomat), exactly one of `RAN` / `DEGRADED — <why>` /
   `SKIPPED — <why>`. A skipped stage can never read as a pass; the Impact row
@@ -759,11 +780,11 @@ main report dropped, at full rigor:
 | Agent | Judgment it owns | Spawns |
 |---|---|---|
 | `qa-intake` | Diff classification, adapter profiles, Jira ACs + Figma links, bootability/outbound/contract probes | every run |
-| `qa-analyst` | Regression risk, AC alignment, Socratic questions, flaky/oasdiff/Pact/impact/manual-test-candidate interpretation — from script JSON only | every run |
+| `qa-analyst` | Regression risk, AC alignment, gap lattice, static flaky-smell detection, Socratic questions, manual-test-candidate framing — from script JSON only; writes `analyst-brief.json`, not prose (contract phrasing and the "most likely to catch a regression" list are fully mechanical, rendered by `render-evidence.ps1`) | every run |
 | `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile | cache miss |
 | `qa-mutation-author` | The 3–8 business-rule mutants | mutation consented |
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
-| `qa-report-synthesizer` | The final report | every run |
+| `qa-report-synthesizer` | The main report only — selects/ranks findings into `report-selection.json` | every run |
 
 **Model tiers**: `qa-intake` and `qa-report-synthesizer` are pinned to a faster
 model (`model: sonnet` in their frontmatter) — both sit alone on the critical
