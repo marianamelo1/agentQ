@@ -621,7 +621,9 @@ number.
 {
   "agentsCalled": ["qa-intake", "qa-analyst", "qa-scenario-writer", "qa-mutation-author", "qa-report-synthesizer"],
   "phases": [
-    { "name": "unit", "actor": "scripts/run-tests.ps1", "seconds": 42.3, "outcome": "RAN" | "DEGRADED — …" | "SKIPPED — …" }
+    { "name": "unit", "actor": "scripts/run-tests.ps1", "seconds": 42.3, "outcome": "RAN" | "DEGRADED — …" | "SKIPPED — …" },
+    { "name": "scenario-authoring", "actor": "qa-scenario-writer", "seconds": 189.4, "outcome": "DEGRADED — agent stalled after dispatch (watchdog ceiling 4.5min + 45s grace), re-dispatched once, succeeded on retry", "stall": { "watchdogFired": true, "retried": true, "retrySucceeded": true, "runBudgetRemainingAtRetrySec": 312.0 } },
+    { "name": "mutation-design", "actor": "qa-mutation-author", "seconds": 270.0, "outcome": "DEGRADED — agent stalled, lane skipped (run-budget)", "stall": { "watchdogFired": true, "retried": false, "retrySucceeded": false, "runBudgetRemainingAtRetrySec": 41.0 } }
   ],
   "totalSeconds": 222.0
 }
@@ -635,6 +637,19 @@ that most wall-clock time is deterministic scripts, not model calls. `totalSecon
 is measured wall-clock for the whole run, not the sum of the `phases` column (phases
 that overlap by design — Phase 4 with Phases 2–3, model work with CPU work — make
 the sum larger than reality).
+
+**`stall` (optional, present only when the watchdog fired — SKILL.md's
+Background-agent & background-job watchdog section)**: `watchdogFired` (bool),
+`retried` (bool — a fresh re-dispatch was attempted), `retrySucceeded` (bool, only
+meaningful when `retried` is true), `runBudgetRemainingAtRetrySec` (the 10-minute
+run budget's remaining seconds at the retry/give-up decision — lets a later reader
+see whether a give-up was a real budget shortage or the one-retry-max rule).
+**`seconds` on a stalled phase is ALWAYS the real elapsed wall-clock, including the
+stall** — never `0.0`, never a placeholder, never "not comparable" (the corrected-
+ledger rule from the 2026-08-25 incident: an earlier version of this file recorded
+two stalled dispatches as `0.0 seconds` and hid 52 minutes of real run time from
+the developer). If a stall's exact duration genuinely cannot be reconstructed,
+record the best available estimate and say so in `outcome` — never a bare zero.
 
 **The "report" phase is appended AFTER `qa-report-synthesizer` returns, BEFORE
 `scripts/render-evidence.ps1` runs** — the one phase whose own duration would
