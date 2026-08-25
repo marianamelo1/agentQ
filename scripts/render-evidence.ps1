@@ -374,18 +374,18 @@ function Get-MutationLevelState {
 }
 
 function Get-ScenariosByLevel {
-    # WHY assign-then-comma (NOT `return , @(pipeline)` in one expression): a
-    # bare `return @(pipeline)` ENUMERATES the array when writing it to the
-    # output stream - zero matches emits zero pipeline objects, so the caller's
-    # `$x = Get-...` captures $null instead of an empty array (verified live:
-    # `.Count` on that $null threw under Set-StrictMode). But combining the
-    # comma with `@()` in the SAME expression double-wraps instead - `, @(x)`
-    # constructs a new 1-element array containing `@(x)` as its single element,
-    # so an empty match set becomes an array of Count 1 (verified live) rather
-    # than Count 0. Materializing the array into a variable FIRST, then
-    # `return , $variable`, avoids both: `@()` on the right-hand side of a
-    # plain assignment is a real materialization (not a pipeline write), and
-    # the comma then wraps that ALREADY-BUILT array as one pipeline object.
+    # WHY the leading comma: a bare `return @(pipeline)` ENUMERATES the array
+    # when writing it to the output stream - zero matches emits zero pipeline
+    # objects, so the caller's `$x = Get-...` captures $null instead of an
+    # empty array (verified live: `.Count` on that $null threw under
+    # Set-StrictMode). `return , @(pipeline)` fixes this correctly on its own
+    # (verified live for 0/1/N matches via plain assignment `$x = Get-...`) -
+    # the two-step assign-then-comma form here is equivalent, not required.
+    # The REAL trap is at the CALL SITE, not in here: wrapping an ALREADY
+    # comma-wrapped function's call in another `@()` - e.g. `@(Get-ScenariosByLevel ...)`
+    # - double-wraps a zero-match result into a 1-element array containing the
+    # empty array (verified live). Callers of this function must assign its
+    # result directly (`$x = Get-ScenariosByLevel ...`), never `@(...)` it again.
     param([string]$Level)
     $filtered = @($scenarios | Where-Object { [string](Get-Prop $_ 'level' '') -eq $Level })
     return , $filtered

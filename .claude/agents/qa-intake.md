@@ -31,8 +31,19 @@ one doesn't need another's answer. Intake is on the critical path of every run
      files under paths matching `Dto|Contract|Request|Response|Model` referenced by
      a web project, or (ApiGateway) `config/routes/*.ocelot.json`.
 
-3. **Adapter profiles** — for every test project that covers changed code, write
-   `adapter-profiles.json`. Resolution is PER TEST PROJECT from manifests, never
+3. **Adapter profiles** — **probe the cache FIRST**: run
+   `scripts/adapter-cache.ps1 -Manifest <path> -Probe`. Adapter-profile
+   derivation is a deterministic function of which files the diff touches plus
+   the repo's own structural config (CI workflow files, `global.json`) — it does
+   NOT depend on what changed inside those files, so an identical diff-path set
+   against unchanged repo structure produces byte-identical profiles every time,
+   and a cache hit means `<workspaceDir>/adapter-profiles.json` already exists
+   with `fromCache: true` — **skip the rest of this task entirely** and move on.
+   On a MISS (the common case for a new diff), derive as below, then run
+   `scripts/adapter-cache.ps1 -Manifest <path> -Store` once you've written
+   `adapter-profiles.json` — this is what makes the NEXT identical-diff run (a
+   re-invocation on the same branch, or a different ticket touching the same
+   files) skip derivation. Resolution is PER TEST PROJECT from manifests, never
    repo-wide:
    - `.csproj` PackageReference: `xunit`/`xunit.v3` → xunit; `NUnit` → nunit3 or
      nunit4 by major version (nunit4 ⇒ generated asserts MUST use the constraint
