@@ -218,6 +218,19 @@ foreach ($proj in $distinctProjects) {
     Write-Verbose "Building $proj"
     $res = Invoke-Dotnet -ArgumentList @('build', $proj, '-c', 'Debug', '--no-restore') -WorkingDirectory $worktreeDir
     $logName = 'build-' + ([System.IO.Path]::GetFileNameWithoutExtension($proj) -replace '[^\w\-\.]', '_') + '.log'
+
+    # WHY retry-without--no-restore on NETSDK1004: a worktree's first-ever build
+    # (fresh worktree, no prior restore) fails with "assets file ... not found" --
+    # an environment/first-run condition, NOT the injected mutant code failing to
+    # compile (verified live: this misreported as a CompileError finding blamed on
+    # the mutant). --no-restore only exists to keep the WARM-worktree path fast;
+    # dropping it once, only on this specific signature, restores the missing
+    # assets and lets the real build result (mutant compiles or not) come through.
+    if ($res.ExitCode -ne 0 -and $res.Output -match 'NETSDK1004') {
+        Write-Utf8NoBom -Path (Join-Path $evidenceDir "$logName.pre-restore") -Content $res.Output
+        $res = Invoke-Dotnet -ArgumentList @('build', $proj, '-c', 'Debug') -WorkingDirectory $worktreeDir
+    }
+
     Write-Utf8NoBom -Path (Join-Path $evidenceDir $logName) -Content $res.Output
     if ($res.ExitCode -ne 0) { $buildFailed[$proj] = $res.ExitCode }
 }
