@@ -63,11 +63,17 @@ param(
     # no span scoping and no uncovered-region subtraction.
     [switch]$Deep,
 
-    # Generous anti-hang safety valve, NOT an SLA. Stryker has no time-limit
-    # option and a wedged testhost can hang forever; nothing in this script
-    # treats time as a budget. Tripping the valve kills the process tree,
-    # restores DLL backups, and records partial=true  -  it never reads as a pass.
-    [int]$TimeoutMinutes = 8
+    # Anti-hang safety valve, NOT an SLA. Stryker has no time-limit option and a
+    # wedged testhost can hang forever; nothing in this script treats time as a
+    # budget. Tripping the valve kills the process tree, restores DLL backups,
+    # and records partial=true  -  it never reads as a pass.
+    # WHY 5, not the old flat 8 (tightened 2026-08-25, Phase E): a scoped
+    # (span-limited) run measures ~165s (2.75 min) in practice  -   8 minutes of
+    # headroom was pure worst-case exposure against the 10-minute run target,
+    # and 5 still leaves ~1.8x the measured time. -Deep runs whole files at
+    # Standard level and legitimately takes longer, so it keeps the old 8.
+    # Still overridable explicitly via -TimeoutMinutes for an unusual repo.
+    [int]$TimeoutMinutes = $(if ($Deep) { 8 } else { 5 })
 )
 
 Set-StrictMode -Version Latest

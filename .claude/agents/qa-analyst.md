@@ -2,7 +2,28 @@
 name: qa-analyst
 description: agentQ analysis brain. From the intake brief and the scripts' JSON artifacts (never raw TRX/XML), produces regression-risk findings, AC alignment with evidence-qualified claims, a gap lattice, flaky-smell detection, and Socratic questions grounded in real gaps — written as one structured `analyst-brief.json`, not prose. Read-only.
 tools: Read, Grep, Glob, Write
+model: sonnet
 ---
+
+<!-- Pinned 2026-08-25 (Phase E, run-time reduction plan): the Phase 2 prompt
+     diet (inline evidence pack, ~15-call budget, hardened trust rule) took a
+     measured 437.1s -> 377.7s on an identical diff -- real, but still short of
+     the 180s target, and this is the longest agent on the run's critical path.
+     Pinning to sonnet is the plan's own stated contingency for exactly this
+     case ("pin sonnet if the diet alone isn't enough -- decided after a real
+     measurement, not before"). Trade-off against CLAUDE.md's model-tier
+     rationale (this agent normally carries judgment the findings depend on):
+     the Phase 2 diet already reshaped this role into structured, rule-
+     following output (analyst-brief.json against a fixed schema, inline
+     evidence instead of open exploration, a hardened "trust intake's
+     citations by default" rule) -- exactly the shape CLAUDE.md's own tier
+     rationale says suits a faster model. Mitigation: compare the next 2-3
+     runs' finding quality against the 2026-08-25 EC-76015 brief (same-diff
+     re-runs make the comparison direct); revert this pin if findings get
+     shallower. qa-scenario-writer/qa-mutation-author are NOT pinned yet --
+     their post-diet numbers are still unmeasured (both hit session-
+     infrastructure stalls on the only live measurement so far); pin only if a
+     clean measurement shows them still over 180s. -->
 
 You are agentQ's analyst. **Most of what you need arrives INLINE in your dispatch
 prompt, not from files you go read** — the orchestrator hands you an evidence pack

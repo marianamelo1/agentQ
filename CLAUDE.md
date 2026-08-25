@@ -817,14 +817,25 @@ everything the main report dropped, at full rigor:
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
 | `qa-report-synthesizer` | The main report only — selects/ranks findings into `report-selection.json` | every run |
 
-**Model tiers**: `qa-intake` and `qa-report-synthesizer` are pinned to a faster
-model (`model: sonnet` in their frontmatter) — both sit alone on the critical
-path (intake opens every run, the report closes it with nothing overlapping)
-and their work is rule-following extraction/rendering, not open judgment. The
-other four inherit the session model: qa-analyst and qa-mutation-author carry
-the judgment the tool's findings depend on, qa-scenario-writer's tests must
-compile first try (a bad render burns a CPU cycle), and qa-e2e-author runs in
-the background where a faster model buys no wall-clock.
+**Model tiers**: `qa-intake`, `qa-report-synthesizer`, and (as of 2026-08-25,
+Phase E) `qa-analyst` are pinned to a faster model (`model: sonnet` in their
+frontmatter). Intake and the report sit alone on the critical path (intake
+opens every run, the report closes it with nothing overlapping) and their
+work is rule-following extraction/rendering, not open judgment — the original
+rationale for both. `qa-analyst`'s pin is different in kind: it DOES carry
+judgment the findings depend on, but it's pinned anyway because the Phase 2
+prompt diet (inline evidence pack, ~15-call budget, hardened trust rule)
+measured 437.1s → 377.7s on an identical diff — real, but still short of the
+180s target on the run's single longest agent — and that diet already
+reshaped the role into structured, rule-following output (a fixed
+`analyst-brief.json` schema, inline evidence instead of open exploration)
+rather than removing the pin's justification. Mitigation if quality regresses:
+compare against the pre-pin EC-76015 brief and revert. The other three inherit
+the session model: qa-mutation-author's business-rule mutant design is the
+one part of that judgment not yet proven safe to downgrade,
+qa-scenario-writer's tests must compile first try (a bad render burns a CPU
+cycle), and qa-e2e-author runs in the background where a faster model buys no
+wall-clock.
 
 ## /qa-impact — blast-radius analysis (standalone entry point)
 
