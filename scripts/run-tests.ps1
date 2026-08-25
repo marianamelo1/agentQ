@@ -102,6 +102,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Cross-platform (Windows + macOS/Linux): $IsWindows doesn't exist on Windows
+# PowerShell 5.1, and StrictMode turns a bare reference into a terminating error.
+# WHY this matters here specifically: this file's own test-run anti-hang valve
+# (`$r.Proc.Kill($true)`, further down) relies on .NET's entire-process-tree
+# Kill() overload, which Windows PowerShell 5.1's .NET Framework does NOT have --
+# unlike stryker-run.ps1/semantic-mutant-driver.ps1, this file had no $IsWin probe
+# at all before this fix. The probe is added now for the new coverlet-install
+# timeout below; the pre-existing `.Kill($true)` call sites are a separate,
+# already-shipped code path and are noted here, not changed, to keep this fix
+# scoped to its own timeout gap.
+$script:IsWin = $true
+$__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
+
 # WHY: git/dotnet emit UTF-8; PS 5.1's OEM-codepage console decoding would mangle
 # non-ASCII test/file names before they round-trip into the JSON artifact.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
@@ -580,7 +594,12 @@ function Invoke-SpecBatch {
             }
             elseif ($r.Sw.Elapsed.TotalSeconds -gt [double]$r.Spec.TimeoutSec) {
                 # Kill the TREE: testhost children keep DLLs locked otherwise.
-                try { $r.Proc.Kill($true) } catch { }
+                # WHY Stop-ProcessTree, not a bare .Kill($true): FIXED 2026-08-25 --
+                # .Kill($true)'s entire-process-tree overload does not exist on
+                # Windows PowerShell 5.1 (.NET Framework); it silently failed there
+                # (caught, swallowed), leaving orphaned testhost processes holding
+                # DLL locks on exactly the machines most likely to hit this path.
+                Stop-ProcessTree -ProcessId $r.Proc.Id
                 $r.Sw.Stop()
                 $r.Spec.Result = @{ ExitCode = -1; TimedOut = $true; StartFailed = $false; DurationSeconds = [math]::Round($r.Sw.Elapsed.TotalSeconds, 3) }
                 $running.RemoveAt($i)
@@ -631,6 +650,22 @@ function Set-SpecCommand {
     }
 }
 
+function Stop-ProcessTree {
+    # Same cross-platform tree-kill as stryker-run.ps1's Stop-ProcessTree.
+    # Used by the coverlet-install timeout below AND (as of 2026-08-25) by the
+    # test-run anti-hang valve's tree-kill, which used to call `.Kill($true)`
+    # directly -- that overload doesn't exist on Windows PowerShell 5.1.
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    if ($script:IsWin) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+        $ErrorActionPreference = $prev
+    } else {
+        try { [System.Diagnostics.Process]::GetProcessById($ProcessId).Kill($true) } catch { }
+    }
+}
+
 function Install-CoverletConsoleOnDemand {
     # On-demand install of the coverlet.console global dotnet tool -- reached
     # ONLY from the dotnet-coverage-calibrated-broken escalation below.
@@ -666,9 +701,17 @@ function Install-CoverletConsoleOnDemand {
             # Already kicked off by the pre-scan near the top of Main,
             # overlapped with this loop's own `dotnet build` calls -- by now
             # it has usually already finished; this just waits out whatever
-            # is left.
-            $script:coverletInstallProc.WaitForExit()
-            $installExitCode = $script:coverletInstallProc.ExitCode
+            # is left. Bounded to 300s: a hung `dotnet tool update` (NuGet
+            # feed/network stall) used to block the whole run indefinitely
+            # right at the moment coverage tries to escalate.
+            if ($script:coverletInstallProc.WaitForExit(300000)) {
+                $installExitCode = $script:coverletInstallProc.ExitCode
+            } else {
+                Stop-ProcessTree -ProcessId $script:coverletInstallProc.Id
+                $null = $script:coverletInstallProc.WaitForExit(15000)
+                $installExitCode = 1
+                $script:coverletInstallTimedOut = $true
+            }
         } else {
             dotnet tool update --global coverlet.console
             $installExitCode = $LASTEXITCODE
@@ -760,6 +803,7 @@ try {
     # finishing: Install-CoverletConsoleOnDemand still does its own
     # synchronous install if this didn't fire in time (or at all).
     $script:coverletInstallProc = $null
+    $script:coverletInstallTimedOut = $false
     if ($null -ne $calibCoverage -and
         (Get-Prop $calibCoverage 'dotnetCoverageWorks' $null) -eq $false -and
         (Get-Prop $calibCoverage 'coverletConsoleWorks' $null) -ne $false -and
@@ -954,6 +998,7 @@ try {
                     $whyNoFallback = if ($mechanism -ne 'dotnet-coverage') { 'not applicable to this mechanism' }
                                       elseif ($coverletKnownBroken) { 'coverlet.console is ALSO calibrated broken on this machine (calibration.coverage.coverletConsoleWorks=false)' }
                                       elseif (-not $tfmForFallback) { 'adapter-profiles.json has no tfm for this project, so the build output directory cannot be located' }
+                                      elseif ([bool]$script:coverletInstallTimedOut) { 'coverlet.console install (dotnet tool update --global coverlet.console) exceeded its 300s anti-hang valve and was killed -- likely a NuGet feed/network stall, not a real failure of the tool itself' }
                                       else { 'coverlet.console could not be installed on demand on this machine (dotnet tool update --global coverlet.console failed, or the tool is still unresolved on PATH after the attempt) -- retry manually with `dotnet tool install --global coverlet.console`, or check NuGet feed/network access' }
                     $coverageNote = "coverage skipped  -  calibration.coverage.$capKey=false on this machine (a prior run produced no parseable class data); coverlet.console fallback not used ($whyNoFallback); re-probe with -ForceCoverage"
                 }
