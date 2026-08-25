@@ -556,6 +556,19 @@ function Set-SpecCommand {
             $Spec.Exe = 'dotnet-coverage'
             $Spec.Args = @('collect', '-f', 'cobertura', '-o', $Spec.CovOut, $inner)
         }
+        elseif ($Spec.Mechanism -eq 'coverlet-console') {
+            # coverlet.console: `-t/--target` is the process to launch, `-a/
+            # --targetargs` is ONE string of ITS arguments (coverlet's own
+            # System.CommandLine parser splits it, same quoting rules as the
+            # dotnet-coverage inner command above) -- so `test ...` here, never
+            # `dotnet test ...` (dotnet is already the --target). Verified live:
+            # pointing at the build output DIRECTORY (not a specific .dll) finds
+            # the SUT + test assemblies without assuming AssemblyName == csproj
+            # name, and produces real per-method Cobertura <class> data.
+            $inner = 'test ' + (($ta | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
+            $Spec.Exe = 'coverlet'
+            $Spec.Args = @($Spec.BinDir, '--target', 'dotnet', '--targetargs', $inner, '--format', 'cobertura', '--output', $Spec.CovOut)
+        }
         else {
             $Spec.Exe = 'dotnet'
             $Spec.Args = @('test') + $ta + @('--collect:XPlat Code Coverage;Format=cobertura;SingleHit=true')
@@ -565,6 +578,66 @@ function Set-SpecCommand {
         $Spec.Exe = 'dotnet'
         $Spec.Args = @('test') + $ta
     }
+}
+
+function Install-CoverletConsoleOnDemand {
+    # On-demand install of the coverlet.console global dotnet tool -- reached
+    # ONLY from the dotnet-coverage-calibrated-broken escalation below.
+    # setup-mcp.ps1 deliberately does NOT pre-install this: the overwhelming
+    # majority of machines never need it (dotnet-coverage already works
+    # there), so paying a network-install cost for everyone up front doesn't
+    # make sense. This is the one call site that has actually earned the
+    # cost -- a prior run already proved the primary mechanism dead HERE.
+    # Same on-demand-safety-net shape as contract-check.ps1's Install-Oasdiff,
+    # but for a NuGet global tool (dotnet tool update already handles package
+    # integrity -- no checksum dance needed), and it must NEVER throw:
+    # coverage is best-effort, unlike oasdiff which contract-check.ps1 cannot
+    # function without.
+    #
+    # Cached for this script invocation only: the profile loop can reach this
+    # branch once per affected .NET test project, and `dotnet tool update`
+    # still hits the NuGet feed even when already installed.
+    if ($null -ne $script:coverletConsoleAvailable) { return $script:coverletConsoleAvailable }
+
+    if (Get-Command coverlet -ErrorAction SilentlyContinue) {
+        $script:coverletConsoleAvailable = $true
+        return $true
+    }
+
+    # Bare/unredirected when we have to install synchronously -- streams
+    # NuGet's own output straight to the console (same transparency as the
+    # `dotnet build` call above) and avoids `2>&1`, which under this script's
+    # $ErrorActionPreference='Stop' can promote a harmless native stderr
+    # write into a terminating error (see the dotnet build note above).
+    $installExitCode = 1
+    try {
+        if ($null -ne $script:coverletInstallProc) {
+            # Already kicked off by the pre-scan near the top of Main,
+            # overlapped with this loop's own `dotnet build` calls -- by now
+            # it has usually already finished; this just waits out whatever
+            # is left.
+            $script:coverletInstallProc.WaitForExit()
+            $installExitCode = $script:coverletInstallProc.ExitCode
+        } else {
+            dotnet tool update --global coverlet.console
+            $installExitCode = $LASTEXITCODE
+        }
+    } catch {
+        $installExitCode = 1
+    }
+
+    # ~/.dotnet/tools may not be on THIS process's PATH yet even though the
+    # tool is now on disk (same hazard setup-mcp.ps1 documents for
+    # dotnet-coverage).
+    $globalToolsBin = Join-Path $HOME (Join-Path '.dotnet' 'tools')
+    if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $globalToolsBin) {
+        $env:PATH += ([IO.Path]::PathSeparator + $globalToolsBin)
+    }
+
+    $script:coverletConsoleAvailable = [bool](
+        $installExitCode -eq 0 -and (Get-Command coverlet -ErrorAction SilentlyContinue)
+    )
+    return $script:coverletConsoleAvailable
 }
 
 # -----------------------------------------------------------------------------
@@ -626,8 +699,37 @@ try {
     if (Test-Path -LiteralPath $calibPathShared) {
         $calibCoverage = Get-Prop (Read-JsonFile -Path $calibPathShared) 'coverage' $null
     }
+
+    # Pre-emptive background kickoff: if ANY .NET profile will need the
+    # coverlet.console escalation (see Install-CoverletConsoleOnDemand below),
+    # start installing it now (network I/O, non-blocking) so it overlaps with
+    # this loop's own `dotnet build` calls instead of adding pure serial
+    # latency right before the first wrapped run that needs it. Purely a
+    # latency optimization -- correctness never depends on this firing or
+    # finishing: Install-CoverletConsoleOnDemand still does its own
+    # synchronous install if this didn't fire in time (or at all).
+    $script:coverletInstallProc = $null
+    if ($null -ne $calibCoverage -and
+        (Get-Prop $calibCoverage 'dotnetCoverageWorks' $null) -eq $false -and
+        (Get-Prop $calibCoverage 'coverletConsoleWorks' $null) -ne $false -and
+        (-not (Get-Command coverlet -ErrorAction SilentlyContinue))) {
+        $needsCoverletFallback = @($profiles) | Where-Object {
+            [string](Get-Prop $_ 'coverageMechanism' 'collector') -eq 'dotnet-coverage'
+        }
+        if (@($needsCoverletFallback).Count -gt 0) {
+            try {
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = 'dotnet'
+                foreach ($a in @('tool', 'update', '--global', 'coverlet.console')) { $null = $psi.ArgumentList.Add($a) }
+                $psi.UseShellExecute = $false
+                $script:coverletInstallProc = [System.Diagnostics.Process]::Start($psi)
+            } catch { $script:coverletInstallProc = $null }
+        }
+    }
+
     $covSeenData  = @{}   # capKey -> $true when a run produced real class data
     $covSeenEmpty = @{}   # capKey -> $true when a completed run produced none
+    $script:coverletConsoleAvailable = $null   # tri-state cache for Install-CoverletConsoleOnDemand
 
     $covDir = Join-Path $workspaceDir 'cov'
     if (-not (Test-Path -LiteralPath $covDir)) { New-Item -ItemType Directory -Force -Path $covDir | Out-Null }
@@ -762,15 +864,45 @@ try {
             $mechanism = [string](Get-Prop $prof 'coverageMechanism' 'collector')
             $capKey = 'collectorWorks'
             if ($mechanism -eq 'dotnet-coverage') { $capKey = 'dotnetCoverageWorks' }
+            $binDirForFallback = $null
             # Capability gate: a mechanism a prior run proved broken on this machine
             # (profiler never attaches, no class data ever) is skipped up front  -
             # the instrumentation costs real time (documented 4x-47x blowups) and
             # produces nothing diff-coverage can parse. -ForceCoverage re-probes.
-            if ($wantCoverage -and -not $ForceCoverage -and $null -ne $calibCoverage) {
-                if ((Get-Prop $calibCoverage $capKey $null) -eq $false) {
+            if ($wantCoverage -and -not $ForceCoverage -and $null -ne $calibCoverage -and
+                (Get-Prop $calibCoverage $capKey $null) -eq $false) {
+                # dotnet-coverage has a documented gap on some machines (osx-arm64:
+                # its native profiler never attaches, so class data is always empty,
+                # forever -- not just once). Escalate to coverlet.console instead of
+                # a bare skip: it instruments the already-built assemblies via IL
+                # rewrite before the target process runs (verified live: no leftover
+                # instrumented/backup DLLs after it finishes), never a profiler
+                # attach on the child process -- a genuinely different mechanism,
+                # not a retry of the one already proven broken here. Scoped to
+                # dotnet-coverage only (the evidenced gap); needs coverlet.console
+                # itself not already proven broken here, the tool present, and a
+                # TFM to find the build output.
+                $tfmForFallback = [string](Get-Prop $prof 'tfm' '')
+                $coverletKnownBroken = ((Get-Prop $calibCoverage 'coverletConsoleWorks' $null) -eq $false)
+                if ($mechanism -eq 'dotnet-coverage' -and -not $coverletKnownBroken -and $tfmForFallback -and
+                    (Install-CoverletConsoleOnDemand)) {
+                    $mechanism = 'coverlet-console'
+                    $capKey = 'coverletConsoleWorks'
+                    $binDirForFallback = Join-Path (Join-Path (Join-Path (Split-Path -Parent $projAbs) 'bin') 'Debug') $tfmForFallback
+                    $coverageDegraded = $true
+                    $coverageNote = 'coverage: dotnet-coverage is calibrated broken on this machine (calibration.coverage.dotnetCoverageWorks=false) -- falling back to coverlet.console (IL-rewrite, no profiler attach, no product .csproj change) instead of losing coverage entirely'
+                }
+                else {
                     $wantCoverage = $false
                     $coverageDegraded = $true
-                    $coverageNote = "coverage skipped  -  calibration.coverage.$capKey=false on this machine (a prior run produced no parseable class data); re-probe with -ForceCoverage"
+                    # Legible even in the worst case (CLAUDE.md: a DEGRADE must
+                    # never read as a generic refusal) -- name exactly which
+                    # fallback was or wasn't tried and why, not just "skipped".
+                    $whyNoFallback = if ($mechanism -ne 'dotnet-coverage') { 'not applicable to this mechanism' }
+                                      elseif ($coverletKnownBroken) { 'coverlet.console is ALSO calibrated broken on this machine (calibration.coverage.coverletConsoleWorks=false)' }
+                                      elseif (-not $tfmForFallback) { 'adapter-profiles.json has no tfm for this project, so the build output directory cannot be located' }
+                                      else { 'coverlet.console could not be installed on demand on this machine (dotnet tool update --global coverlet.console failed, or the tool is still unresolved on PATH after the attempt) -- retry manually with `dotnet tool install --global coverlet.console`, or check NuGet feed/network access' }
+                    $coverageNote = "coverage skipped  -  calibration.coverage.$capKey=false on this machine (a prior run produced no parseable class data); coverlet.console fallback not used ($whyNoFallback); re-probe with -ForceCoverage"
                 }
             }
 
@@ -778,6 +910,7 @@ try {
                 ProjRel = $projRel; ProjAbs = $projAbs; Filter = $filter
                 SolutionWide = $solutionWide
                 WantCoverage = $wantCoverage; Mechanism = $mechanism; CapKey = $capKey
+                BinDir = $binDirForFallback
                 CoverageDegraded = $coverageDegraded; CoverageNote = $coverageNote
                 TrxDir = $specTrxDir; TrxName = $trxName; TrxPath = $trxPath
                 CovOut = (Join-Path $covDir "$projKey.cobertura.xml")
@@ -1008,7 +1141,8 @@ try {
             # (verified live: the old degrade path re-ran a 5m19s suite in full).
             if ($spec.WantCoverage) {
                 $covXml = $null
-                if ($spec.Mechanism -eq 'dotnet-coverage') {
+                if ($spec.Mechanism -eq 'dotnet-coverage' -or $spec.Mechanism -eq 'coverlet-console') {
+                    # Both write directly to the exact -o/--output path we gave them.
                     if (Test-Path -LiteralPath $spec.CovOut) { $covXml = $spec.CovOut }
                 }
                 else {

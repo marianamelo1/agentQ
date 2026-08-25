@@ -14,9 +14,16 @@ Does the whole setup in one run:
      install anything: oasdiff (contract lane, checksum-verified into tools/),
      dotnet-stryker (mutation lane, machine-shared under tools/stryker),
      dotnet-coverage (coverage lane, global dotnet tool), and Playwright
-     browsers for every registered repo that declares @playwright/test. The
-     version pins live in contract-check.ps1 / stryker-run.ps1 - this script
-     just invokes their -EnsureTool modes. Cross-platform (Windows + macOS).
+     browsers for every registered repo that declares @playwright/test.
+     (coverlet.console - the coverage FALLBACK for a machine where
+     dotnet-coverage's native profiler never attaches, a documented gap on
+     osx-arm64 - is deliberately NOT installed here: run-tests.ps1 installs
+     it itself, lazily, only once dotnet-coverage has already been proven
+     broken on that machine. Pre-installing it for every developer would pay
+     a real download cost the overwhelming majority of machines never need.)
+     The version pins live in contract-check.ps1 / stryker-run.ps1 - this
+     script just invokes their -EnsureTool modes. Cross-platform (Windows +
+     macOS).
   3. persists the environment variables agentQ needs, opening the token pages
      in your browser so you only have to paste:
        JIRA_PERSONAL_ACCESS_TOKEN  required - used by scripts/jira.ps1 (a direct
@@ -205,7 +212,8 @@ if ($Reset) {
 
 Write-Host "agentQ setup"
 Write-Host "Checks/installs the tools every script needs, downloads the pinned lane"
-Write-Host "tools (oasdiff, dotnet-stryker, dotnet-coverage, Playwright browsers) so"
+Write-Host "tools (oasdiff, dotnet-stryker, dotnet-coverage,"
+Write-Host "Playwright browsers) so"
 Write-Host "no review ever pauses to install, saves the environment variables"
 Write-Host "(opening the token pages for you), and finishes with a status check that"
 Write-Host "includes a live Jira probe. Outside tools/, nothing is written to any"
@@ -372,6 +380,12 @@ if (Get-Command dotnet -ErrorAction SilentlyContinue) {
             Write-Host "[failed] dotnet-coverage - $($_.Exception.Message)" -ForegroundColor Red
         }
     }
+
+    # coverlet.console (the coverage fallback for a machine where
+    # dotnet-coverage's native profiler never attaches) is deliberately NOT
+    # installed here -- run-tests.ps1 installs it on demand, lazily, only
+    # once calibration.json has already proven dotnet-coverage broken on
+    # that machine. See CLAUDE.md precondition 5.
 } else {
     Write-Host "[skipped] dotnet-stryker + dotnet-coverage - need the .NET SDK (see above), then re-run this script" -ForegroundColor Yellow
 }

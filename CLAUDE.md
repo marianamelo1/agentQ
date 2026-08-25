@@ -84,7 +84,16 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
    `-EnsureTool` modes do the install); `scripts/check-mcp.ps1` verifies all of
    them read-only against those pins. Cross-platform (Windows + macOS). The
    on-demand install at first use remains only as a safety net for a machine
-   that skipped setup.
+   that skipped setup (`oasdiff` / `dotnet-stryker` / `dotnet-coverage`).
+   `coverlet.console` (coverage FALLBACK for a machine where `dotnet-coverage`'s
+   native profiler never attaches — documented gap on osx-arm64) is
+   deliberately NEVER pre-installed by setup at all: `run-tests.ps1` installs
+   it itself, lazily, at the exact moment it is about to escalate to it — only
+   on a machine where `dotnet-coverage` has ALREADY been proven broken by a
+   prior run — kicked off as a non-blocking background process so it overlaps
+   with that run's own test-project builds instead of adding serial latency.
+   `scripts/check-mcp.ps1` still reports its presence read-only, purely
+   informational.
 6. Impact lanes (Phase 1b — opt-in: enabled by `toggles.skipQaImpact: false`; the
    default `true` skips the phase, shown honestly as `SKIPPED — disabled by config`
    in the report's Impact row): `testRepos` in the config points at the local
@@ -193,11 +202,27 @@ tripping one degrades honestly, never silently.
   `workspace/<repo>/calibration.json` size each phase up front; every estimate shown
   to the developer comes from measurements, never guesses ("unknown — first run on
   this repo" until they exist). Calibration also self-records coverage
-  **capability** (`coverage.dotnetCoverageWorks` / `coverage.collectorWorks`): a
-  machine whose profiler yields no class data skips the instrumentation up front on
-  later runs (DEGRADED row, `-ForceCoverage` re-probes) — and a completed
-  coverage-wrapped run is NEVER re-run just because its coverage came back empty
-  (the TRX results are real; only a timed-out wrapped run re-runs plainly).
+  **capability** (`coverage.dotnetCoverageWorks` / `coverage.collectorWorks` /
+  `coverage.coverletConsoleWorks`): a machine whose profiler yields no class data
+  skips that mechanism's instrumentation up front on later runs (DEGRADED row,
+  `-ForceCoverage` re-probes) — and a completed coverage-wrapped run is NEVER
+  re-run just because its coverage came back empty (the TRX results are real;
+  only a timed-out wrapped run re-runs plainly). Specifically for
+  `dotnet-coverage` (documented gap: its native profiler never attaches on
+  osx-arm64, so class data would otherwise be empty on EVERY run there, not just
+  the first): once calibrated broken, `run-tests.ps1` escalates to
+  `coverlet.console` instead of a bare skip — IL-rewrite based, so it needs zero
+  product `.csproj` change either, same as `dotnet-coverage` itself.
+  `coverlet.console` itself is fetched on demand, right at this escalation
+  point, by `run-tests.ps1` — kicked off as a non-blocking background process
+  as soon as calibration shows `dotnet-coverage` broken (before any test
+  project builds), so the install overlaps with this loop's own build time
+  instead of adding serial latency; cached for the invocation and, once
+  installed, for every later run on that machine. Never pre-installed by
+  `setup-mcp.ps1` — the large majority of machines never reach this branch at
+  all. Only when that fallback is ALSO calibrated broken (or the on-demand
+  install itself fails) does coverage skip outright, and the note names
+  exactly which of the two was tried and why the other wasn't.
 - Front-loaded consent: both consent moments (mutation, execution) are asked in ONE
   message right after intake, with intake's outbound destinations and calibrated
   estimates — human answer latency then overlaps machine work instead of
@@ -372,7 +397,13 @@ green), raised `MaxCpuCount`, anti-hang timeout. Coverage capability is
 self-calibrating: a mechanism recorded broken on this machine
 (`calibration.coverage.*Works=false`) is skipped up front, and a completed wrapped
 run with empty coverage keeps its real TRX results — only a TIMED-OUT wrapped run
-re-runs plainly. **Execution is two-lane, bounded-parallel**: test projects with
+re-runs plainly. `dotnet-coverage` specifically escalates to `coverlet.console`
+once calibrated broken (documented osx-arm64 profiler-attach gap) rather than
+skipping outright — same "no product `.csproj` change" guarantee, a genuinely
+different mechanism (IL rewrite, not a profiler attach), never attempted until
+`dotnet-coverage` is already proven broken HERE, at which point `run-tests.ps1`
+installs `coverlet.console` itself, on demand and overlapped with build time
+(never pre-installed by `setup-mcp.ps1`). **Execution is two-lane, bounded-parallel**: test projects with
 no `Microsoft.AspNetCore.Mvc.Testing` reference (direct or one ProjectReference
 level deep) run up to 3 concurrently with `MaxCpuCount` split so total machine
 load stays ~constant; factory-booting projects run one-at-a-time with all cores
