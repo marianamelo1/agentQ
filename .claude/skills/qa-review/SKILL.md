@@ -141,7 +141,10 @@ intent, then map onto these four slots:
    honestly (relay the skippedReason lines, they are findings about scope, not
    noise); coverage self-calibrates (a broken mechanism on this machine is skipped
    up front and reported DEGRADED; the JS related lane emits cobertura, so
-   diff-coverage works there too). There are NO flaky re-runs (removed — they
+   diff-coverage works there too). .NET projects execute two-lane
+   bounded-parallel (factory-free projects share the machine 3-at-a-time with a
+   split core budget; anything referencing Mvc.Testing runs alone — relay each
+   entry's `runNote`). There are NO flaky re-runs (removed — they
    multiplied run time): every failed test lands in the artifact's
    `flaky.mightBeFlaky` with a ready-to-run `rerunCommand`; the report presents
    it as *failed — might be flaky, re-run yourself outside agentQ with this

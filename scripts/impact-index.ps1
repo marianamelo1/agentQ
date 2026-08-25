@@ -138,7 +138,11 @@ function Get-SeedsFromFile {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hunks
     )
     $seeds = New-Object System.Collections.Generic.List[object]
-    $full = Join-Path $RepoPath ($RelPath -replace '/', '\')
+    # WHY DirectorySeparatorChar, not a literal '\': $RelPath comes from git (always
+    # '/') -- on Windows this yields native backslash paths as before; on macOS/Linux
+    # it's an identity transform, so the already-native '/' paths pass through intact
+    # instead of becoming literal backslash characters Test-Path can't resolve.
+    $full = Join-Path $RepoPath ($RelPath -replace '/', [IO.Path]::DirectorySeparatorChar)
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return $seeds }  # deleted file
 
     # --- Ocelot route config: the file itself IS the API surface (CLAUDE.md) -- every

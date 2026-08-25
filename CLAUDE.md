@@ -68,9 +68,18 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
    `scripts/jira.ps1`).
 4. .NET SDK on PATH for .NET repos (`dotnet --list-sdks`), Node ≥ the repo's engines
    for JS repos. Docker only matters for consented Testcontainers/compose paths.
-5. One-time per repo, offered on first run (consented, never silent): local
-   `dotnet-stryker` tool restore, `oasdiff` pinned-binary download into `tools/`
-   (checksum-verified), Playwright browsers (frontend repos).
+5. Lane tools are installed and verified by `scripts/setup-mcp.ps1` — running
+   setup IS the consent, so no review ever pauses to ask for an install: pinned
+   `dotnet-stryker` once per machine into `tools/stryker` (a repo's own
+   committed tool-manifest pin wins and is restored in the worktree instead),
+   `oasdiff` pinned-binary download into `tools/` (checksum-verified),
+   `dotnet-coverage` as a global dotnet tool, Playwright browsers for
+   registered repos declaring `@playwright/test`. The version pins live only in
+   the owning runtime scripts (`contract-check.ps1`, `stryker-run.ps1` — their
+   `-EnsureTool` modes do the install); `scripts/check-mcp.ps1` verifies all of
+   them read-only against those pins. Cross-platform (Windows + macOS). The
+   on-demand install at first use remains only as a safety net for a machine
+   that skipped setup.
 6. Impact lanes (Phase 1b — opt-in: enabled by `toggles.skipQaImpact: false`; the
    default `true` skips the phase, shown honestly as `SKIPPED — disabled by config`
    in the report's Impact row): `testRepos` in the config points at the local
@@ -87,6 +96,20 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 
 ## Safety rules (non-negotiable)
 
+- **Cross-platform: Windows AND macOS, always.** Most developers on this team
+  use macOS; agentQ itself is authored and tested on Windows. Every script
+  change, bugfix, or new feature MUST work on both — this is never an
+  afterthought bolted on later. Concretely: no hardcoded `.exe` suffixes (probe
+  `$IsWindows`/`$IsMacOS` — absent on Windows PowerShell 5.1, so check via
+  `Get-Variable -ErrorAction SilentlyContinue`, never a bare reference under
+  StrictMode), no `cmd.exe`/`taskkill`/backslash-only paths without a Unix
+  branch, `Join-Path` (never string-concatenated backslashes) for every path,
+  no Windows-only env-var scope (`[Environment]::...'User'` scope doesn't
+  exist on Unix — see `setup-mcp.ps1`/`check-mcp.ps1` for the profile-file
+  fallback pattern), pinned-tool downloads must resolve the right OS/arch asset
+  (darwin/linux + arm64/amd64, not just windows/amd64). When a script can't
+  reasonably be tested on the other OS in this session, say so explicitly
+  rather than silently assuming Windows-only is good enough.
 - **Product repos are read-only.** All work products live in this repo's
   `workspace/` (worktrees, coverage, caches) and `reports/`. The single exception:
   generated tests the developer explicitly asked to keep, applied as a diff they
@@ -133,6 +156,11 @@ consume those files and never re-parse raw TRX/XML. At most 4 agents spawn in a
 normal run; model-bound work overlaps CPU-bound work, but CPU-heavy phases never
 overlap each other (WebApplicationFactory's non-configurable 5s host-build timeout
 and Stryker's Timeout verdicts are load-sensitive — overlap manufactures false reds).
+WITHIN a phase, execution is bounded-parallel with a fixed total core budget:
+test projects (and semantic mutants) that cannot boot a WebApplicationFactory run
+up to 3-at-a-time with `MaxCpuCount` divided so machine load stays ~constant;
+anything factory-booting runs strictly one-at-a-time with all cores — each run
+entry's `runNote` states which lane it got and why.
 
 ## Performance principles (fast by construction — no SLA, no cutoffs)
 
@@ -331,7 +359,14 @@ green), raised `MaxCpuCount`, anti-hang timeout. Coverage capability is
 self-calibrating: a mechanism recorded broken on this machine
 (`calibration.coverage.*Works=false`) is skipped up front, and a completed wrapped
 run with empty coverage keeps its real TRX results — only a TIMED-OUT wrapped run
-re-runs plainly. Filters are built per project from
+re-runs plainly. **Execution is two-lane, bounded-parallel**: test projects with
+no `Microsoft.AspNetCore.Mvc.Testing` reference (direct or one ProjectReference
+level deep) run up to 3 concurrently with `MaxCpuCount` split so total machine
+load stays ~constant; factory-booting projects run one-at-a-time with all cores
+(the 5s host-build timeout is load-sensitive — sharing the machine manufactures
+false reds). Every run entry's `runNote` names its lane. Every run — plain
+included — now carries the anti-hang valve (a wedged testhost is killed and
+reported, never hung on). Filters are built per project from
 the adapter profile: `FullyQualifiedName~<TestClass>` terms (never `=` —
 parameterized names), xUnit categories via trait `Category=`, NUnit via
 `TestCategory=`. JS: **file-granular related selection on every runner, Nx
@@ -418,7 +453,11 @@ run has finished.
    where mechanical mutants all die or none applies). All injected at once behind
    `AGENTQ_MUTANT` env-var switches (a `const` is promoted to a static property in
    the worktree copy), **one** build, then
-   `scripts/semantic-mutant-driver.ps1` runs one filtered test pass per id. For
+   `scripts/semantic-mutant-driver.ps1` runs one filtered test pass per id —
+   bounded-parallel (up to 3 concurrent; the switch is a per-PROCESS env var set
+   via a cmd wrapper, so concurrent mutants cannot see each other's value —
+   verified by an isolation test; factory-booting test projects still run
+   one-at-a-time). For
    each of its OWN mutants that survives, qa-mutation-author drafts a concrete
    strengthened-assertion edit to the covering test (worktree-only) — a real
    "keep this?" candidate in the report, not just a verbal recommendation.
@@ -429,13 +468,23 @@ run has finished.
    `AGENTQ_MUTANT` switches are GONE before Stryker runs — verified live: Stryker
    mutates the injected switch lines themselves otherwise, manufacturing artifact
    "survivors"; `stryker-run.ps1` refuses to start if it still finds them. Then
-   `scripts/stryker-run.ps1` — pinned local tool,
+   `scripts/stryker-run.ps1` — pinned tool resolved ONCE per machine into
+   `tools\stryker` via `--tool-path` (like oasdiff; a repo-committed tool-manifest
+   pin still wins and is restored in the worktree — never a per-worktree install),
    **never `--since`** (verified broken for this use); `-m` globs on changed files
    minus changed-but-uncovered regions, `{start..end}` char-span hunks (padded,
    whole-file fallback if 0 mutants), `-l Basic`, `-c` = logical cores, config file
-   for `coverage-analysis: perTest` / `test-case-filter` / `ignore-mutations`
-   (config-only options), pre-created `-O`, anti-hang valve (kill → restore DLLs →
-   "tested X of Y mutants — no claims about the rest").
+   for `coverage-analysis: perTest` / `ignore-mutations` / **`test-case-filter`
+   derived from the diff-related test classes** — the baseline + per-mutant runs
+   execute only those tests, because the whole-project baseline dominated the
+   tier's wall-clock; the consequence binds every consumer: a survivor means
+   **"no test related to this change kills it"**, never "no test in the project" —
+   pre-created `-O`, anti-hang valve (kill → restore DLLs → "tested X of Y
+   mutants — no claims about the rest"). **Result cache**: each (test project ×
+   SUT) run is keyed by source-content hash + scope + filter + level + tool
+   version into `workspace/<repoSlug>/mutation-cache/` — identical inputs reuse
+   the prior report verbatim (`fromCache: true` in summary.json; steady-state
+   re-runs skip Stryker entirely); timeouts/partials are never cached.
 3. `scripts/merge-mutation-reports.ps1` unions both into one
    mutation-testing-elements JSON. JS side: StrykerJS + jest-runner, `--incremental`.
 `-Deep` opt-in: Standard level, whole files, no scoping.
@@ -629,7 +678,11 @@ main report dropped, at full rigor:
   <reason>`.
 - Mutation reports **absolute survivors** ("a wrong X would ship"), never a
   percentage — a scoped mutation score compares to nothing. Suppress
-  `NoCoverage` mutants (they're coverage findings).
+  `NoCoverage` mutants (they're coverage findings). When the run used a
+  `test-case-filter` (summary.json carries it), every survivor claim is scoped
+  honestly: "no test **related to this change** kills it" — never "no test in
+  the project kills it". A `fromCache: true` run states that its verdicts were
+  reused from an identical prior run, not re-executed.
 - Contract: ERR → "breaking change to the documented API contract (rule <id>) —
   any consumer relying on this shape will break"; WARN → "potentially
   breaking — needs human judgment"; only Pact findings may name a consumer.

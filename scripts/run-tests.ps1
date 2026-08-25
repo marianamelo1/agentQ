@@ -66,6 +66,10 @@
 #     the affected-subset heuristic  -  Phase 7's generated tests are the exact set.
 #     It writes test-results-generated[-<label>].json, NEVER test-results.json  -
 #     verified live: it used to clobber Phase 2's unit results
+#   * cross-platform (Windows + macOS): a repo-relative path from diff-set.json/
+#     adapter-profiles.json always uses git's '/' -- every join against it goes
+#     through `-replace '/', [IO.Path]::DirectorySeparatorChar` (identity on
+#     macOS/Linux, backslash on Windows as before), never a literal '\'
 # =============================================================================
 [CmdletBinding()]
 param(
@@ -184,7 +188,7 @@ function Invoke-JestRelatedRun {
         foreach ($p in $rels) {
             if ($p -notmatch '\.(js|jsx|ts|tsx)$' -or $p -match '\.d\.ts$') { continue }
             if ($prefix -ne '' -and -not $p.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
-            $abs = Join-Path $ExecRoot ($p -replace '/', '\')
+            $abs = Join-Path $ExecRoot ($p -replace '/', [IO.Path]::DirectorySeparatorChar)
             if (Test-Path -LiteralPath $abs -PathType Leaf) { $changedAbs.Add($abs) }
         }
     }
@@ -192,7 +196,7 @@ function Invoke-JestRelatedRun {
     $result.RelatedFileCount = $changedAbs.Count
 
     $projDirAbs = $ExecRoot
-    if ($projRoot -ne '') { $projDirAbs = Join-Path $ExecRoot ($projRoot -replace '/', '\') }
+    if ($projRoot -ne '') { $projDirAbs = Join-Path $ExecRoot ($projRoot -replace '/', [IO.Path]::DirectorySeparatorChar) }
     $jestCfg = $null
     foreach ($cand in @('jest.config.ts', 'jest.config.js', 'jest.config.cjs', 'jest.config.mjs')) {
         $p = Join-Path $projDirAbs $cand
@@ -440,82 +444,127 @@ function Get-AffectedTestClasses {
 }
 
 # -----------------------------------------------------------------------------
-# Coverage wrapper  -  dotnet-coverage (preferred: zero csproj changes needed) or
-# the XPlat collector (only when coverlet.collector is already referenced).
-# Runs the WHOLE dotnet test invocation as a job so the anti-hang valve can kill
-# it without killing this script (documented 4x-47x coverage blowups exist).
+# .NET execution engine  -  specs + bounded-concurrency scheduler.
+# Each test project becomes ONE spec (plain, collector-wrapped, or
+# dotnet-coverage-wrapped  -  the wrapper choice is baked into Exe/Args at
+# schedule time). Specs that CANNOT boot a WebApplicationFactory run in a
+# parallel lane (throttle 3, MaxCpuCount divided so total machine load stays
+# ~constant); factory-booting projects run strictly one-at-a-time with all
+# cores  -  the factory's non-configurable 5s host-build timeout is
+# load-sensitive, and sharing the machine manufactures false reds (the exact
+# failure mode measured in the 40-project parallel nx run).
 # -----------------------------------------------------------------------------
 
-function Invoke-CoverageWrappedTest {
-    param(
-        [Parameter(Mandatory = $true)][string]$Mechanism,     # collector | dotnet-coverage
-        [Parameter(Mandatory = $true)][string]$WorkDir,
-        [Parameter(Mandatory = $true)][string[]]$DotnetArgs,   # args to `dotnet test ...` (no leading "test")
-        [Parameter(Mandatory = $true)][string]$CoverageOutXml,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
-    )
-    $result = [ordered]@{ ExitCode = -1; CoverageDegraded = $false; TimedOut = $false; StartFailed = $false; CoverageXml = $null }
-
-    if ($Mechanism -eq 'dotnet-coverage') {
-        # WHY the inner command is a single quoted string: dotnet-coverage collect
-        # <cmd> <args> takes the wrapped invocation as one process specification.
-        $inner = 'dotnet test ' + (($DotnetArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
-        $args = @('collect', '-f', 'cobertura', '-o', $CoverageOutXml, $inner)
-        $exe = 'dotnet-coverage'
-    }
-    else {
-        $args = @('test') + $DotnetArgs + @('--collect:XPlat Code Coverage;Format=cobertura;SingleHit=true')
-        $exe = 'dotnet'
-    }
-
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe
-    foreach ($a in $args) { $null = $psi.ArgumentList.Add($a) }
-    $psi.WorkingDirectory = $WorkDir
-    $psi.UseShellExecute = $false
-    # WHY try/catch on Start: the mechanism's exe may simply not exist on this
-    # machine (verified live: dotnet-coverage not installed -> Win32Exception ->
-    # the WHOLE unit lane died with exit 1). A missing coverage tool is a
-    # coverage degrade, never a run failure  -  the caller re-runs plainly and
-    # records the mechanism as broken in calibration.json.
+function Test-BootsWebFactory {
+    # TRUE when the test project can boot a WebApplicationFactory: its csproj
+    # references Microsoft.AspNetCore.Mvc.Testing directly, or via ONE level of
+    # ProjectReference (e-conomic hosts the factory infra in a shared
+    # Tests.Common project). Unreadable csproj -> $true: the safe side is the
+    # sequential lane, never a maybe-flaky parallel run.
+    param([Parameter(Mandatory = $true)][string]$ProjAbs)
     try {
-        $proc = [System.Diagnostics.Process]::Start($psi)
-    } catch {
-        $result.StartFailed = $true
-        $result.CoverageDegraded = $true
-        return $result
-    }
-    $finished = $proc.WaitForExit($TimeoutSeconds * 1000)
+        if (Select-String -LiteralPath $ProjAbs -Pattern 'Microsoft\.AspNetCore\.Mvc\.Testing' -Quiet) { return $true }
+        $projDir = Split-Path -Parent $ProjAbs
+        $raw = [System.IO.File]::ReadAllText($ProjAbs)
+        foreach ($m in [regex]::Matches($raw, '<ProjectReference\s+Include="([^"]+)"')) {
+            $refAbs = [System.IO.Path]::GetFullPath((Join-Path $projDir ($m.Groups[1].Value -replace '/', [IO.Path]::DirectorySeparatorChar)))
+            if ((Test-Path -LiteralPath $refAbs -PathType Leaf) -and
+                (Select-String -LiteralPath $refAbs -Pattern 'Microsoft\.AspNetCore\.Mvc\.Testing' -Quiet)) { return $true }
+        }
+        return $false
+    } catch { return $true }
+}
 
-    if (-not $finished) {
-        $result.TimedOut = $true
-        $result.CoverageDegraded = $true
-        try { $proc.Kill($true) } catch { }
-        # WHY -CoverageDegraded rather than re-running here: the caller already has
-        # the un-wrapped filter/args and re-invokes plainly, so this function's job
-        # ends at "coverage collection hung" without duplicating the plain-run path.
-        return $result
-    }
-    $result.ExitCode = $proc.ExitCode
+function Start-SpecProcess {
+    # Starts ONE spec's native process. No stream redirection  -  same as the old
+    # coverage wrapper: child console noise is harmless (the script's stdout
+    # contract is the single summary line), and PSI redirection without a drain
+    # thread deadlocks on chatty children.
+    # WHY try/catch on Start: the spec's exe may not exist on this machine
+    # (verified live: dotnet-coverage missing -> Win32Exception killed the lane).
+    param($Spec)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Spec.Exe
+    foreach ($a in @($Spec.Args)) { $null = $psi.ArgumentList.Add($a) }
+    $psi.WorkingDirectory = $Spec.WorkDir
+    $psi.UseShellExecute = $false
+    try { return @{ Proc = [System.Diagnostics.Process]::Start($psi); StartFailed = $false } }
+    catch { return @{ Proc = $null; StartFailed = $true } }
+}
 
-    if ($Mechanism -eq 'dotnet-coverage') {
-        if (Test-Path -LiteralPath $CoverageOutXml) { $result.CoverageXml = $CoverageOutXml }
-        else { $result.CoverageDegraded = $true }
+function Invoke-SpecBatch {
+    # Bounded-concurrency scheduler. Fills up to $Throttle slots, polls, refills.
+    # Every spec carries its own anti-hang deadline; tripping it kills the whole
+    # process tree and marks the spec TimedOut  -  identical valve semantics to
+    # the old sequential path, now also covering PLAIN runs (a wedged testhost
+    # used to hang the script forever). Results land in $spec.Result.
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Specs,
+        [Parameter(Mandatory = $true)][int]$Throttle
+    )
+    if (@($Specs).Count -eq 0) { return }
+    $pending = New-Object 'System.Collections.Generic.Queue[object]'
+    foreach ($s in @($Specs)) { $pending.Enqueue($s) }
+    $running = New-Object 'System.Collections.Generic.List[object]'
+    while ($pending.Count -gt 0 -or $running.Count -gt 0) {
+        while ($pending.Count -gt 0 -and $running.Count -lt $Throttle) {
+            $spec = $pending.Dequeue()
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $st = Start-SpecProcess -Spec $spec
+            if ($st.StartFailed) {
+                $sw.Stop()
+                $spec.Result = @{ ExitCode = -1; TimedOut = $false; StartFailed = $true; DurationSeconds = 0.0 }
+                continue
+            }
+            $running.Add(@{ Spec = $spec; Proc = $st.Proc; Sw = $sw })
+        }
+        if ($running.Count -eq 0) { continue }
+        Start-Sleep -Milliseconds 300
+        for ($i = $running.Count - 1; $i -ge 0; $i--) {
+            $r = $running[$i]
+            if ($r.Proc.HasExited) {
+                $r.Sw.Stop()
+                $r.Spec.Result = @{ ExitCode = $r.Proc.ExitCode; TimedOut = $false; StartFailed = $false; DurationSeconds = [math]::Round($r.Sw.Elapsed.TotalSeconds, 3) }
+                $running.RemoveAt($i)
+            }
+            elseif ($r.Sw.Elapsed.TotalSeconds -gt [double]$r.Spec.TimeoutSec) {
+                # Kill the TREE: testhost children keep DLLs locked otherwise.
+                try { $r.Proc.Kill($true) } catch { }
+                $r.Sw.Stop()
+                $r.Spec.Result = @{ ExitCode = -1; TimedOut = $true; StartFailed = $false; DurationSeconds = [math]::Round($r.Sw.Elapsed.TotalSeconds, 3) }
+                $running.RemoveAt($i)
+            }
+        }
+    }
+}
+
+function Set-SpecCommand {
+    # Bakes Exe/Args/CommandString into a spec for its assigned core budget.
+    # Called again (plain shape, full cores) when a wrapped run must re-run.
+    param($Spec, [int]$AssignedCores, [bool]$AsPlain = $false)
+    $ta = @($Spec.ProjAbs, '--no-build', '--no-restore', '--logger', "trx;LogFileName=$($Spec.TrxName)", '--results-directory', $Spec.TrxDir)
+    if ($Spec.Filter) { $ta += @('--filter', $Spec.Filter) }
+    # WHY TreatNoTestsAsError=true unconditionally: verified  -  VSTest exits 0
+    # on a filter matching zero tests, which would otherwise read as a pass.
+    $ta += @('--', "RunConfiguration.MaxCpuCount=$AssignedCores", 'RunConfiguration.TreatNoTestsAsError=true')
+    $Spec.CommandString = "dotnet test $($ta -join ' ')"
+    if ($Spec.WantCoverage -and -not $AsPlain) {
+        if ($Spec.Mechanism -eq 'dotnet-coverage') {
+            # WHY the inner command is a single quoted string: dotnet-coverage
+            # collect <cmd> takes the wrapped invocation as one process spec.
+            $inner = 'dotnet test ' + (($ta | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' ')
+            $Spec.Exe = 'dotnet-coverage'
+            $Spec.Args = @('collect', '-f', 'cobertura', '-o', $Spec.CovOut, $inner)
+        }
+        else {
+            $Spec.Exe = 'dotnet'
+            $Spec.Args = @('test') + $ta + @('--collect:XPlat Code Coverage;Format=cobertura;SingleHit=true')
+        }
     }
     else {
-        # WHY glob for the newest file: --collect:"XPlat Code Coverage" writes to
-        # TestResults/<random-guid>/coverage.cobertura.xml BY DESIGN  -  a
-        # results-directory switch does not remove the GUID subfolder, so a
-        # hardcoded path is the single most common breakage in scripted pipelines.
-        $found = Get-ChildItem -Path $WorkDir -Recurse -Filter 'coverage.cobertura.xml' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($null -ne $found) {
-            Copy-Item -LiteralPath $found.FullName -Destination $CoverageOutXml -Force
-            $result.CoverageXml = $CoverageOutXml
-        }
-        else { $result.CoverageDegraded = $true }
+        $Spec.Exe = 'dotnet'
+        $Spec.Args = @('test') + $ta
     }
-    return $result
 }
 
 # -----------------------------------------------------------------------------
@@ -589,7 +638,19 @@ try {
     $runs = New-Object System.Collections.Generic.List[object]
     $builtProjects = New-Object 'System.Collections.Generic.HashSet[string]'
     $plainRunSecondsTotal = 0.0
-    $coverageSecondsTotal = 0.0
+
+    # .NET projects are SPEC'd in the profile loop (checks + build only) and
+    # executed afterwards by the bounded scheduler  -  see the engine functions.
+    $dotnetSpecs = New-Object System.Collections.Generic.List[object]
+    # Anti-hang budget per spec: generous multiple of a calibrated run, or a flat
+    # fallback on a repo agentQ hasn't seen yet. Now applies to PLAIN runs too
+    # (a wedged testhost used to hang the script forever).
+    $dotnetTimeoutSec = 480
+    if (Test-Path -LiteralPath $calibPathShared) {
+        $calibForTimeout = Read-JsonFile -Path $calibPathShared
+        $plainCalib = [double](Get-Prop $calibForTimeout 'plainRunSeconds' 0)
+        if ($plainCalib -gt 0) { $dotnetTimeoutSec = [Math]::Max(120, [int]($plainCalib * 6)) }
+    }
 
     foreach ($prof in $profiles) {
         $framework = [string](Get-Prop $prof 'framework' '')
@@ -598,7 +659,7 @@ try {
 
         if ($isDotnet) {
             $projRel = ([string](Get-Prop $prof 'projectPath' '')) -replace '\\', '/'
-            $projAbs = Join-Path $execRoot ($projRel -replace '/', '\')
+            $projAbs = Join-Path $execRoot ($projRel -replace '/', [IO.Path]::DirectorySeparatorChar)
             if (-not (Test-Path -LiteralPath $projAbs)) {
                 $null = $runs.Add([ordered]@{
                     projectPath = $projRel; command = $null; exitCode = -1
@@ -662,26 +723,25 @@ try {
                 $null = $builtProjects.Add($projAbs)
             }
 
-            $trxName = "$(([string](Get-Prop $prof 'projectPath' 'proj') -replace '[\\/:]', '_'))-run1.trx"
-            $trxPath = Join-Path $trxDir $trxName
+            # ---- spec only  -  execution happens in the bounded scheduler AFTER
+            # this loop (parallel lane for factory-free projects, sequential lane
+            # for anything that can boot a WebApplicationFactory).
+            $projKey = ($projRel -replace '[\\/:]', '_')
+            $specTrxDir = Join-Path $trxDir $projKey
+            # WHY a per-project results dir: parallel collector runs would otherwise
+            # drop their TestResults/<guid> attachments into one shared dir and the
+            # newest-file pick could cross projects.
+            New-Item -ItemType Directory -Force -Path $specTrxDir | Out-Null
+            $trxName = "$projKey-run1.trx"
+            $trxPath = Join-Path $specTrxDir $trxName
+            if (Test-Path -LiteralPath $trxPath) { Remove-Item -LiteralPath $trxPath -Force }
 
-            $testArgs = @($projAbs, '--no-build', '--no-restore', '--logger', "trx;LogFileName=$trxName", '--results-directory', $trxDir)
-            if ($filter) { $testArgs += @('--filter', $filter) }
-            # WHY TreatNoTestsAsError=true unconditionally: verified  -  VSTest exits 0
-            # on a filter matching zero tests, which would otherwise read as a pass.
-            $testArgs += @('--', "RunConfiguration.MaxCpuCount=$cores", 'RunConfiguration.TreatNoTestsAsError=true')
-
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $coverageDegraded = $false
             $coverageNote = $null
-            $exitCode = 0
-            $ranTests = $false
-
             $wantCoverage = (-not $SkipCoverage) -and (-not $GeneratedOnly)
             $mechanism = [string](Get-Prop $prof 'coverageMechanism' 'collector')
             $capKey = 'collectorWorks'
             if ($mechanism -eq 'dotnet-coverage') { $capKey = 'dotnetCoverageWorks' }
-
             # Capability gate: a mechanism a prior run proved broken on this machine
             # (profiler never attaches, no class data ever) is skipped up front  -
             # the instrumentation costs real time (documented 4x-47x blowups) and
@@ -694,103 +754,19 @@ try {
                 }
             }
 
-            if ($wantCoverage) {
-                $covOut = Join-Path $covDir "$(([string](Get-Prop $prof 'projectPath' 'proj') -replace '[\\/:]', '_')).cobertura.xml"
-                # Anti-hang budget: generous multiple of a calibrated plain run, or a
-                # flat fallback on a repo agentQ hasn't seen yet. This degrades
-                # ("re-run without coverage"), it never lets the run hang.
-                $timeoutSec = 480
-                if (Test-Path -LiteralPath $calibPathShared) {
-                    $calib = Read-JsonFile -Path $calibPathShared
-                    $plain = [double](Get-Prop $calib 'plainRunSeconds' 0)
-                    if ($plain -gt 0) { $timeoutSec = [Math]::Max(120, [int]($plain * 6)) }
-                }
-                $cr = Invoke-CoverageWrappedTest -Mechanism $mechanism -WorkDir $execRoot -DotnetArgs $testArgs -CoverageOutXml $covOut -TimeoutSeconds $timeoutSec
-                if ($cr.StartFailed) {
-                    # The mechanism's exe isn't on this machine at all  -  no tests
-                    # ran (plain run below), and calibration records the mechanism
-                    # broken so the next run skips the attempt up front.
-                    $coverageDegraded = $true
-                    $coverageNote = "coverage tool for mechanism '$mechanism' could not start (not installed on this machine)  -  ran without coverage; recorded in calibration"
-                    $covSeenEmpty[$capKey] = $true
-                }
-                elseif ($cr.TimedOut) {
-                    # The killed run left no trustworthy TRX  -  this is the ONLY
-                    # degrade path that re-runs the tests (plainly, below).
-                    $coverageDegraded = $true
-                    $coverageNote = "coverage-wrapped run tripped the ${timeoutSec}s anti-hang valve  -  re-ran without coverage"
-                }
-                else {
-                    $exitCode = $cr.ExitCode
-                    $ranTests = $true
-                    # Validate the XML actually carries class data: a wrapped run can
-                    # complete fine while the profiler never attached (verified live:
-                    # "No code coverage data available. Profiler was not initialized"
-                    #  -  the file exists, holds zero <class> elements, and
-                    # diff-coverage refuses later). The TEST results are still real:
-                    # NEVER re-run a completed suite just because coverage is empty
-                    # (the old degrade path re-ran a 5m19s suite in full).
-                    $covHasData = $false
-                    if (-not $cr.CoverageDegraded -and $null -ne $cr.CoverageXml -and (Test-Path -LiteralPath $cr.CoverageXml)) {
-                        $covHasData = [bool](Select-String -LiteralPath $cr.CoverageXml -Pattern '<class' -Quiet)
-                    }
-                    if ($covHasData) {
-                        $covSeenData[$capKey] = $true
-                    }
-                    else {
-                        $coverageDegraded = $true
-                        $coverageNote = 'coverage-wrapped run completed but produced no parseable class data  -  test results kept, coverage marked degraded (no duplicate run)'
-                        $covSeenEmpty[$capKey] = $true
-                    }
-                }
-            }
-
-            if (-not $ranTests) {
-                # WHY not `2>&1`: see the nx branch below -- dotnet's own MSBuild/NuGet
-                # warnings on stderr are just as capable of triggering the same crash.
-                & dotnet test @testArgs --no-build | Out-Null
-                $exitCode = $LASTEXITCODE
-            }
-            $sw.Stop()
-            $durationSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 3)
-
-            $trx = Read-TrxResult -TrxPath $trxPath
-            $zeroMatch = ($trx.Executed -eq 0)
-
-            if (-not $GeneratedOnly -and $builtProjects.Count -le $profiles.Count) {
-                $plainRunSecondsTotal += $durationSeconds
-            }
-
-            $entry = [ordered]@{
-                projectPath      = $projRel
-                command          = "dotnet test $($testArgs -join ' ')"
-                exitCode         = $exitCode
-                testsDiscovered  = $trx.Executed
-                testsExecuted    = $trx.Executed
-                passed           = $trx.Passed
-                failed           = $trx.Failed
-                skipped          = $trx.Skipped
-                zeroMatchError   = $zeroMatch
-                durationSeconds  = $durationSeconds
-                coverageDegraded = $coverageDegraded
-                coverageNote     = $coverageNote
-                # WHY .ToArray(), not @(...): on this PS build `@(<List[object]>)`
-                # throws "Argument types do not match" (the same empirically-
-                # confirmed quirk documented in worktree.ps1); .ToArray() is safe.
-                failures         = $trx.Failures.ToArray()
-                perTestDurations = $trx.PerTestDurations.ToArray()
-                trxPath          = $trxPath
-            }
-            if ($zeroMatch -and $solutionWide -and -not $GeneratedOnly) {
-                # The derived classes matched nothing in this suite. For a
-                # solution-wide suite that means "nothing here is diff-relevant"  -
-                # an honest skip, never a zero-match red (exitCode forced to 0 so
-                # risk-score's build-failed heuristic cannot misfire on it).
-                $entry.exitCode = 0
-                $entry.zeroMatchError = $false
-                $entry.skippedReason = "solution-wide suite  -  affected-class filter matched no tests; treated as SKIPPED, not a zero-match failure"
-            }
-            $null = $runs.Add($entry)
+            $null = $dotnetSpecs.Add(@{
+                ProjRel = $projRel; ProjAbs = $projAbs; Filter = $filter
+                SolutionWide = $solutionWide
+                WantCoverage = $wantCoverage; Mechanism = $mechanism; CapKey = $capKey
+                CoverageDegraded = $coverageDegraded; CoverageNote = $coverageNote
+                TrxDir = $specTrxDir; TrxName = $trxName; TrxPath = $trxPath
+                CovOut = (Join-Path $covDir "$projKey.cobertura.xml")
+                TimeoutSec = $dotnetTimeoutSec
+                Boots = (Test-BootsWebFactory -ProjAbs $projAbs)
+                WorkDir = $execRoot
+                Exe = $null; Args = $null; CommandString = $null
+                Result = $null; PriorSeconds = 0.0; RunNote = $null
+            })
             continue
         }
 
@@ -809,7 +785,7 @@ try {
                 # Direct jest with the project's own config — NOT `nx affected`: nx's
                 # fan-out yields aggregate counts only, and anti-vacuity needs per-test
                 # outcomes to prove it was the GENERATED tests that failed on base.
-                $projDirAbs = Join-Path $execRoot ($projRoot -replace '/', '\')
+                $projDirAbs = Join-Path $execRoot ($projRoot -replace '/', [IO.Path]::DirectorySeparatorChar)
                 $jestCfg = $null
                 foreach ($cand in @('jest.config.ts', 'jest.config.js', 'jest.config.cjs', 'jest.config.mjs')) {
                     $p = Join-Path $projDirAbs $cand
@@ -933,6 +909,144 @@ try {
             zeroMatchError = $false; durationSeconds = 0.0; failures = @(); perTestDurations = @()
             trxPath = $null; skippedReason = "no adapter for framework '$framework'"
         })
+    }
+
+    # ---------------- .NET execution: bounded-parallel scheduler -----------------
+    # Two lanes: factory-free projects share the machine (throttle 3, each with
+    # MaxCpuCount = cores/throttle so total load stays ~constant); anything that
+    # can boot a WebApplicationFactory runs strictly one-at-a-time with all cores.
+    # Phases still never overlap each other  -  this is WITHIN-phase parallelism
+    # with a bounded core budget, not phase overlap.
+    if ($dotnetSpecs.Count -gt 0) {
+        $dotnetWall = [System.Diagnostics.Stopwatch]::StartNew()
+        $parallelSpecs = @($dotnetSpecs | Where-Object { -not $_.Boots })
+        $serialSpecs   = @($dotnetSpecs | Where-Object { $_.Boots })
+        $throttle = [Math]::Min(3, [Math]::Max(1, $parallelSpecs.Count))
+        $parallelCores = [int][Math]::Max(1, [Math]::Floor($cores / $throttle))
+        foreach ($spec in $parallelSpecs) {
+            Set-SpecCommand -Spec $spec -AssignedCores $parallelCores
+            $spec.RunNote = "parallel lane (up to $throttle concurrent projects, MaxCpuCount=$parallelCores each)  -  no WebApplicationFactory reference, safe to share the machine"
+        }
+        foreach ($spec in $serialSpecs) {
+            Set-SpecCommand -Spec $spec -AssignedCores $cores
+            $spec.RunNote = "sequential lane  -  the test project references Microsoft.AspNetCore.Mvc.Testing (directly or via a test-common ProjectReference); WebApplicationFactory's 5s host-build timeout is load-sensitive, so it never shares the machine"
+        }
+        Invoke-SpecBatch -Specs $parallelSpecs -Throttle $throttle
+        Invoke-SpecBatch -Specs $serialSpecs -Throttle 1
+
+        # Wrapped runs that produced no trustworthy TRX (tool missing / valve
+        # tripped) re-run PLAINLY, one at a time with all cores  -  identical
+        # semantics to the old sequential degrade path.
+        $rerunSpecs = New-Object System.Collections.Generic.List[object]
+        foreach ($spec in $dotnetSpecs) {
+            if (-not $spec.WantCoverage -or $null -eq $spec.Result) { continue }
+            $res = $spec.Result
+            if ($res.StartFailed) {
+                $spec.CoverageDegraded = $true
+                $spec.CoverageNote = "coverage tool for mechanism '$($spec.Mechanism)' could not start (not installed on this machine)  -  ran without coverage; recorded in calibration"
+                $covSeenEmpty[$spec.CapKey] = $true
+            }
+            elseif ($res.TimedOut) {
+                $spec.CoverageDegraded = $true
+                $spec.CoverageNote = "coverage-wrapped run tripped the $($spec.TimeoutSec)s anti-hang valve  -  re-ran without coverage"
+            }
+            else { continue }
+            $spec.PriorSeconds = [double]$spec.PriorSeconds + [double]$res.DurationSeconds
+            if (Test-Path -LiteralPath $spec.TrxPath) { Remove-Item -LiteralPath $spec.TrxPath -Force }
+            Set-SpecCommand -Spec $spec -AssignedCores $cores -AsPlain $true
+            $spec.WantCoverage = $false
+            $spec.Result = $null
+            $null = $rerunSpecs.Add($spec)
+        }
+        Invoke-SpecBatch -Specs @($rerunSpecs.ToArray()) -Throttle 1
+        $dotnetWall.Stop()
+        # Calibration reads the PHASE wall-clock (what a developer actually waits),
+        # not the per-project sum  -  parallel lanes make the sum exceed reality.
+        if (-not $GeneratedOnly) { $plainRunSecondsTotal += [math]::Round($dotnetWall.Elapsed.TotalSeconds, 3) }
+
+        # ---- parse every spec into its run entry (same shapes/rules as before) --
+        foreach ($spec in $dotnetSpecs) {
+            $res = $spec.Result
+            $durationSeconds = [math]::Round(([double]$spec.PriorSeconds + [double]$res.DurationSeconds), 3)
+            if ($res.TimedOut -or $res.StartFailed) {
+                # A PLAIN run that hung or could not start: an honest failure entry,
+                # never a silent hole (wrapped timeouts were already re-run above).
+                $why = if ($res.TimedOut) { "test run exceeded the $($spec.TimeoutSec)s anti-hang valve and its process tree was killed" } else { 'test process could not start' }
+                $null = $runs.Add([ordered]@{
+                    projectPath = $spec.ProjRel; command = $spec.CommandString; exitCode = -1
+                    testsDiscovered = 0; testsExecuted = 0; passed = 0; failed = 0; skipped = 0
+                    zeroMatchError = $false; durationSeconds = $durationSeconds
+                    coverageDegraded = $spec.CoverageDegraded; coverageNote = $spec.CoverageNote
+                    runNote = $spec.RunNote
+                    failures = @(@{ fqn = '<anti-hang>'; message = $why; stack = '' })
+                    perTestDurations = @(); trxPath = $spec.TrxPath
+                })
+                continue
+            }
+            # Coverage validation for completed WRAPPED runs. The TEST results are
+            # real regardless: NEVER re-run a completed suite over empty coverage
+            # (verified live: the old degrade path re-ran a 5m19s suite in full).
+            if ($spec.WantCoverage) {
+                $covXml = $null
+                if ($spec.Mechanism -eq 'dotnet-coverage') {
+                    if (Test-Path -LiteralPath $spec.CovOut) { $covXml = $spec.CovOut }
+                }
+                else {
+                    # WHY glob for the newest file: the XPlat collector writes to
+                    # TestResults/<random-guid>/coverage.cobertura.xml BY DESIGN;
+                    # the per-project TrxDir keeps the pick safe under parallelism.
+                    $found = Get-ChildItem -Path $spec.TrxDir -Recurse -Filter 'coverage.cobertura.xml' -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                    if ($null -ne $found) {
+                        Copy-Item -LiteralPath $found.FullName -Destination $spec.CovOut -Force
+                        $covXml = $spec.CovOut
+                    }
+                }
+                $covHasData = $false
+                if ($null -ne $covXml) { $covHasData = [bool](Select-String -LiteralPath $covXml -Pattern '<class' -Quiet) }
+                if ($covHasData) {
+                    $covSeenData[$spec.CapKey] = $true
+                }
+                else {
+                    $spec.CoverageDegraded = $true
+                    $spec.CoverageNote = 'coverage-wrapped run completed but produced no parseable class data  -  test results kept, coverage marked degraded (no duplicate run)'
+                    $covSeenEmpty[$spec.CapKey] = $true
+                }
+            }
+            $trx = Read-TrxResult -TrxPath $spec.TrxPath
+            $zeroMatch = ($trx.Executed -eq 0)
+            $entry = [ordered]@{
+                projectPath      = $spec.ProjRel
+                command          = $spec.CommandString
+                exitCode         = $res.ExitCode
+                testsDiscovered  = $trx.Executed
+                testsExecuted    = $trx.Executed
+                passed           = $trx.Passed
+                failed           = $trx.Failed
+                skipped          = $trx.Skipped
+                zeroMatchError   = $zeroMatch
+                durationSeconds  = $durationSeconds
+                coverageDegraded = $spec.CoverageDegraded
+                coverageNote     = $spec.CoverageNote
+                runNote          = $spec.RunNote
+                # WHY .ToArray(), not @(...): on this PS build `@(<List[object]>)`
+                # throws "Argument types do not match" (the same empirically-
+                # confirmed quirk documented in worktree.ps1); .ToArray() is safe.
+                failures         = $trx.Failures.ToArray()
+                perTestDurations = $trx.PerTestDurations.ToArray()
+                trxPath          = $spec.TrxPath
+            }
+            if ($zeroMatch -and $spec.SolutionWide -and -not $GeneratedOnly) {
+                # The derived classes matched nothing in this suite. For a
+                # solution-wide suite that means "nothing here is diff-relevant"  -
+                # an honest skip, never a zero-match red (exitCode forced to 0 so
+                # risk-score's build-failed heuristic cannot misfire on it).
+                $entry.exitCode = 0
+                $entry.zeroMatchError = $false
+                $entry.skippedReason = "solution-wide suite  -  affected-class filter matched no tests; treated as SKIPPED, not a zero-match failure"
+            }
+            $null = $runs.Add($entry)
+        }
     }
 
     # ---------------- might-be-flaky tagging (NO local re-runs, by design) -------

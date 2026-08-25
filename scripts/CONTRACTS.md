@@ -179,6 +179,7 @@ There is no local override — the PR pipeline runs these suites on every PR.
       "skippedReason": null,         // set (with exitCode 0) when the project run was honestly skipped
       "selection": "related-files",  // JS entries only (the only JS selection mode)
       "selectionNote": "…",          // JS entries only: what was selected AND what deliberately wasn't (dependents run in the PR pipeline)
+      "runNote": "…",                // .NET entries only: which execution lane ran it — "parallel lane (up to N concurrent projects, MaxCpuCount=X each)" or "sequential lane — references Microsoft.AspNetCore.Mvc.Testing…" (the factory's 5s host-build timeout is load-sensitive)
       "failures": [{ "fqn": "…", "file": "…", "message": "…", "stack": "…", "rerunCommand": "…" }],
       "perTestDurations": [{ "fqn": "…", "seconds": 0.12 }],
       "trxPath": "…"
@@ -275,6 +276,19 @@ candidate, not just a verbal recommendation. Mechanical (Stryker) survivors
 never carry one — qa-mutation-author only drafts fixes for mutants it designed
 itself, since it authored them before Stryker's own survivors are even known
 (Phase 5 ordering: business-rule tier runs first).
+
+### stryker/summary.json (stryker-run.ps1) + workspace/<repoSlug>/mutation-cache/
+Each summary entry additionally carries `testCaseFilter` (the vstest expression
+Stryker's baseline AND per-mutant runs were limited to — derived from the
+diff-related test classes; `null` = whole test project) and `fromCache` (`true`
+= the report was reused verbatim from `workspace/<repoSlug>/mutation-cache/`,
+no Stryker execution this run). Two consumer rules bind:
+- With a `testCaseFilter`, a survivor claim is ALWAYS scoped: "no test
+  **related to this change** kills it" — never "no test in the project".
+- The cache is keyed by source-file CONTENT hash + mutate scope + filter +
+  mutation level + pinned tool version (`<key>.report.json` + `<key>.meta.json`,
+  branch-agnostic, repo-level). Only COMPLETE runs are cached — a timeout or
+  partial result is re-attempted next run, never replayed.
 
 ## scenarios/  (qa-scenario-writer)
 `scenarios/scenario-<AC>-<n>.json` — the framework-neutral IR:

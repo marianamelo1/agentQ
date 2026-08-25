@@ -82,6 +82,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Cross-platform (Windows + macOS/Linux): $IsWindows doesn't exist on Windows
+# PowerShell 5.1, and StrictMode turns a bare reference into a terminating error.
+$script:IsWin = $true
+$__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
+
 # WHY: git emits UTF-8 on stdout, but Windows PowerShell 5.1 decodes native output with the
 # OEM codepage by default  -  non-ASCII file names in diff/ls-files output would be mangled and
 # then fail to round-trip into worktree copies. Best-effort: some hosts refuse the assignment.
@@ -238,9 +244,13 @@ function Restore-BranchState {
     # has not `git add`ed yet is exactly the code most in need of QA  -  plain diff misses it.
     $copied = 0
     foreach ($rel in (Get-DevUntrackedFiles -Repo $Repo)) {
-        $relWin = $rel -replace '/', '\'
-        $src = Join-Path $Repo $relWin
-        $dst = Join-Path $WorktreeDir $relWin
+        # DirectorySeparatorChar (not a literal '\'): identity on macOS/Linux -- $rel
+        # comes from git (always '/'); forcing backslash there broke Test-Path/
+        # Copy-Item on non-Windows, so a dev's untracked new file was silently
+        # never copied into the worktree.
+        $relNative = $rel -replace '/', [IO.Path]::DirectorySeparatorChar
+        $src = Join-Path $Repo $relNative
+        $dst = Join-Path $WorktreeDir $relNative
         $dstDir = Split-Path -Parent $dst
         if (-not (Test-Path -LiteralPath $dstDir)) {
             New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
@@ -732,20 +742,24 @@ function Invoke-ModeEnsure {
         $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wt, 'HEAD')
     }
 
-    # WHY a junction, not a copy: node_modules is gitignored (never checked out into a new
+    # WHY a link, not a copy: node_modules is gitignored (never checked out into a new
     # worktree at all -- confirmed: `git worktree add` leaves it entirely absent, so `nx`/`jest`
     # fail outright with "Could not find Nx modules") and is commonly 1GB+ (verified: 1.3GB on
-    # e-conomic/client) -- copying it per run would violate fast-by-construction. A junction needs
-    # no admin/Developer-Mode elevation (unlike a symbolic link) and survives `git clean -fd`
-    # (clean respects .gitignore by default, so an ignored dir is never swept). Shared, not
-    # copied, so a branch that changes package.json/the lockfile would run against stale deps --
-    # an accepted limitation for now, not silently wrong: dependency-changing branches are rare
-    # and the risk is a false-green from an out-of-date install, not a crash.
+    # e-conomic/client) -- copying it per run would violate fast-by-construction. On Windows, a
+    # junction needs no admin/Developer-Mode elevation (unlike a symbolic link there) and survives
+    # `git clean -fd` (clean respects .gitignore by default, so an ignored dir is never swept).
+    # Junctions are an NTFS-only concept (New-Item -ItemType Junction fails outright on
+    # macOS/Linux); on those platforms a plain symbolic link is the equivalent and needs no
+    # elevation to begin with. Either way it's shared, not copied, so a branch that changes
+    # package.json/the lockfile would run against stale deps -- an accepted limitation for now,
+    # not silently wrong: dependency-changing branches are rare and the risk is a false-green
+    # from an out-of-date install, not a crash.
     $repoNodeModules = Join-Path $repo 'node_modules'
     $wtNodeModules   = Join-Path $wt 'node_modules'
     if ((Test-Path -LiteralPath $repoNodeModules -PathType Container) -and
         -not (Test-Path -LiteralPath $wtNodeModules)) {
-        $null = New-Item -ItemType Junction -Path $wtNodeModules -Target $repoNodeModules
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        $null = New-Item -ItemType $linkType -Path $wtNodeModules -Target $repoNodeModules
     }
 
     # Reuse path cleans first (stale generated tests / mutation leftovers from the previous run);
@@ -811,13 +825,14 @@ function Invoke-ModeEnsureBase {
         $null = Invoke-Git -Dir $wtb -GitArgs @('checkout', '--force', '--detach', $m.baseSha)
     }
 
-    # Same node_modules junction rationale as -Ensure (gitignored, 1GB+, never
-    # checked out into a fresh worktree).
+    # Same node_modules link rationale as -Ensure (gitignored, 1GB+, never
+    # checked out into a fresh worktree; junction on Windows, symlink elsewhere).
     $repoNodeModules = Join-Path $repo 'node_modules'
     $wtbNodeModules  = Join-Path $wtb 'node_modules'
     if ((Test-Path -LiteralPath $repoNodeModules -PathType Container) -and
         -not (Test-Path -LiteralPath $wtbNodeModules)) {
-        $null = New-Item -ItemType Junction -Path $wtbNodeModules -Target $repoNodeModules
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        $null = New-Item -ItemType $linkType -Path $wtbNodeModules -Target $repoNodeModules
     }
 
     $genCopied = Copy-GeneratedTests -WorkspaceDir $ws -TargetDir $wtb
@@ -842,7 +857,8 @@ function Invoke-ModeFlipToBase {
     # generated test pass vacuously against base  -  the exact failure anti-vacuity exists to catch.
     $removed = 0
     foreach ($rel in (Get-DevUntrackedFiles -Repo $m.repoPath)) {
-        $p = Join-Path $wt ($rel -replace '/', '\')
+        # DirectorySeparatorChar (not a literal '\'): identity on macOS/Linux.
+        $p = Join-Path $wt ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
         if (Test-Path -LiteralPath $p -PathType Leaf) {
             Remove-Item -LiteralPath $p -Force
             $removed++
@@ -915,17 +931,27 @@ function Invoke-ModeHeal {
             $survivors.Add($wt)   # healthy and ours
             continue
         }
-        $gitdir = $null
+        $gitdirNative = $null   # actual OS path, for the real filesystem check
+        $gitdir = $null         # Get-NormalizedPath's forced-backslash form, for comparison only
         $dotGit = Join-Path $wt '.git'
         if (Test-Path -LiteralPath $dotGit -PathType Leaf) {
             $first = Get-Content -LiteralPath $dotGit -TotalCount 1
             if ($null -ne $first -and $first -match '^gitdir:\s*(.+)$') {
                 $g = $Matches[1].Trim()
                 if (-not [System.IO.Path]::IsPathRooted($g)) { $g = Join-Path $wt $g }
+                $gitdirNative = $g
                 $gitdir = Get-NormalizedPath -Path $g
             }
         }
-        if ($null -ne $gitdir -and (Test-Path -LiteralPath $gitdir) -and -not $gitdir.StartsWith($repoGitDir + '\')) {
+        # WHY Test-Path on $gitdirNative, not $gitdir: Get-NormalizedPath forces '\'
+        # unconditionally (a Windows-only convention used for STRING comparisons
+        # below) -- feeding that fake backslash form to Test-Path/filesystem calls
+        # on macOS/Linux always returns false (no real path contains a literal '\'),
+        # which made this healing pass fail to recognize ANY other repo's live
+        # worktree and delete it as if orphaned. $gitdir stays backslash-normalized
+        # for the StartsWith check, which only ever compares against $repoGitDir
+        # (itself normalized the same way), so that comparison stays correct.
+        if ($null -ne $gitdirNative -and (Test-Path -LiteralPath $gitdirNative) -and -not $gitdir.StartsWith($repoGitDir + '\')) {
             # Live link into some OTHER repo's .git  -  another repo's healthy worktree; not ours to heal.
             $survivors.Add($wt)
             continue

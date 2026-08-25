@@ -137,7 +137,10 @@ try {
                         foreach ($prof in $profiles) {
                             $framework = [string](Get-Prop $prof 'framework' '')
                             if (-not (@('xunit', 'nunit3', 'nunit4') -contains $framework)) { continue }
-                            $projRel = ([string](Get-Prop $prof 'projectPath' '')) -replace '/', '\'
+                            # DirectorySeparatorChar (not a literal '\'): identity on macOS/Linux --
+                            # without this, the build-warming loop silently Test-Path-misses every
+                            # project on non-Windows and never actually warms anything.
+                            $projRel = ([string](Get-Prop $prof 'projectPath' '')) -replace '/', [IO.Path]::DirectorySeparatorChar
                             $projAbs = Join-Path $root $projRel
                             if (-not (Test-Path -LiteralPath $projAbs -PathType Leaf)) { continue }
                             & dotnet build $projAbs -c Debug -v:q --nologo | Out-Null

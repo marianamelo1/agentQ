@@ -127,7 +127,7 @@ $stripPrefixes = @(
     (ConvertTo-ForwardSlash $repoPath)
 ) | Where-Object { -not [string]::IsNullOrEmpty($_) }
 
-$strykerSummaryPath = Join-Path $workspaceDir 'stryker\summary.json'
+$strykerSummaryPath = Join-Path $workspaceDir 'stryker/summary.json'
 $mutantsPath        = Join-Path $workspaceDir 'mutants.json'
 $outPath            = Join-Path $workspaceDir 'mutation-report.json'
 

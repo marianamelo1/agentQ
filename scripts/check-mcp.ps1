@@ -1,9 +1,11 @@
 #Requires -Version 5.1
 <#
 check-mcp.ps1  -  read-only status check of everything THIS project depends on:
-prerequisite tools, the MCP servers declared in .mcp.json, the env vars, the
-Figma connector, and a LIVE Jira connectivity probe (scripts/jira.ps1 -Probe -
-Jira is a direct REST lane, not an MCP).
+prerequisite tools, the pinned lane tools that setup-mcp.ps1 installs (oasdiff,
+dotnet-stryker, dotnet-coverage, Playwright browsers - verified against the
+pins in their owning scripts, never installed here), the MCP servers declared
+in .mcp.json, the env vars, the Figma connector, and a LIVE Jira connectivity
+probe (scripts/jira.ps1 -Probe - Jira is a direct REST lane, not an MCP).
 Works on Windows (PowerShell 5.1+) and macOS/Linux (pwsh 7+).
 
 `/mcp` and `claude mcp list` count every server across every scope (including
@@ -60,6 +62,85 @@ foreach ($t in $tools) {
         $suffix = if ($t.Optional) { ' (optional - consented Testcontainers paths only)' } else { ' - run .\scripts\setup-mcp.ps1' }
         Write-Host ("[missing] {0}{1}" -f $t.Command, $suffix) -ForegroundColor $(if ($t.Optional) { 'Yellow' } else { 'Red' })
     }
+}
+
+# --- lane tools (pinned; installed by setup-mcp.ps1 - verified here, never installed) --
+
+Write-Host ""
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$toolsDir = Join-Path $repoRoot 'tools'
+
+function Get-PinnedVersion {
+    # The version pins live in the owning runtime scripts (single source of
+    # truth) - read them from there instead of duplicating the numbers here.
+    param([Parameter(Mandatory)][string]$ScriptFile, [Parameter(Mandatory)][string]$Pattern)
+    $hit = Select-String -Path (Join-Path $PSScriptRoot $ScriptFile) -Pattern $Pattern | Select-Object -First 1
+    if ($hit) { return $hit.Matches[0].Groups[1].Value }
+    return $null
+}
+
+function Test-PinnedBinary {
+    # Present AND reporting the pinned version (a stale binary would change
+    # verdicts between machines - same rule the runtime scripts enforce).
+    param([Parameter(Mandatory)][string]$ExePath, [string]$Pin)
+    if (-not (Test-Path -LiteralPath $ExePath)) { return 'missing' }
+    if (-not $Pin) { return 'present' }   # pin unreadable: report presence only
+    try {
+        $ver = (& $ExePath --version) -join ' '
+        if ($LASTEXITCODE -eq 0 -and $ver -match [regex]::Escape($Pin)) { return 'ok' }
+    } catch { }
+    return 'stale'
+}
+
+$oasdiffPin = Get-PinnedVersion -ScriptFile 'contract-check.ps1' -Pattern "OasdiffVersion\s*=\s*'([^']+)'"
+$oasdiffExe = Join-Path $toolsDir $(if ($IsWin) { 'oasdiff.exe' } else { 'oasdiff' })
+switch (Test-PinnedBinary -ExePath $oasdiffExe -Pin $oasdiffPin) {
+    'ok'      { Write-Host "[ok] oasdiff v$oasdiffPin (pinned - contract lane)" -ForegroundColor Green }
+    'present' { Write-Host "[ok?] oasdiff present but pin unreadable from contract-check.ps1" -ForegroundColor Yellow }
+    'stale'   { Write-Host "[stale] oasdiff present but not v$oasdiffPin - re-run .\scripts\setup-mcp.ps1" -ForegroundColor Yellow }
+    'missing' { Write-Host "[missing] oasdiff (contract lane) - run .\scripts\setup-mcp.ps1" -ForegroundColor Red }
+}
+
+$strykerPin = Get-PinnedVersion -ScriptFile 'stryker-run.ps1' -Pattern "StrykerVersion\s*=\s*'([^']+)'"
+$strykerDir = Join-Path $toolsDir 'stryker'
+$strykerExe = Join-Path $strykerDir $(if ($IsWin) { 'dotnet-stryker.exe' } else { 'dotnet-stryker' })
+# dotnet-stryker has no bare --version flag (verified live) - the tool-path
+# install metadata is the reliable offline pin check.
+$strykerState = 'missing'
+if (Test-Path -LiteralPath $strykerExe) {
+    if (-not $strykerPin) { $strykerState = 'present' }
+    else {
+        $strykerState = 'stale'
+        if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+            try {
+                $listOut = (& dotnet tool list --tool-path $strykerDir) -join "`n"
+                if ($LASTEXITCODE -eq 0 -and $listOut -match ('(?im)^dotnet-stryker\s+' + [regex]::Escape($strykerPin))) { $strykerState = 'ok' }
+            } catch { }
+        }
+    }
+}
+switch ($strykerState) {
+    'ok'      { Write-Host "[ok] dotnet-stryker v$strykerPin (pinned - mutation lane; a repo's own tool-manifest pin wins at run time)" -ForegroundColor Green }
+    'present' { Write-Host "[ok?] dotnet-stryker present but pin unreadable from stryker-run.ps1" -ForegroundColor Yellow }
+    'stale'   { Write-Host "[stale] dotnet-stryker present but not v$strykerPin - re-run .\scripts\setup-mcp.ps1" -ForegroundColor Yellow }
+    'missing' { Write-Host "[missing] dotnet-stryker (mutation lane) - run .\scripts\setup-mcp.ps1" -ForegroundColor Red }
+}
+
+if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) {
+    Write-Host "[ok] dotnet-coverage (coverage lane)" -ForegroundColor Green
+} elseif (Test-Path (Join-Path $HOME (Join-Path '.dotnet' (Join-Path 'tools' $(if ($IsWin) { 'dotnet-coverage.exe' } else { 'dotnet-coverage' }))))) {
+    Write-Host "[ok] dotnet-coverage installed - not on PATH in this session; restart the terminal" -ForegroundColor Yellow
+} else {
+    Write-Host "[missing] dotnet-coverage (coverage lane) - run .\scripts\setup-mcp.ps1" -ForegroundColor Red
+}
+
+$pwCache = if ($IsWin) { Join-Path $env:LOCALAPPDATA 'ms-playwright' }
+           elseif ($null -ne $IsMacOS -and $IsMacOS) { Join-Path $HOME (Join-Path 'Library' (Join-Path 'Caches' 'ms-playwright')) }
+           else { Join-Path $HOME (Join-Path '.cache' 'ms-playwright') }
+if ((Test-Path $pwCache) -and @(Get-ChildItem $pwCache -Directory -ErrorAction SilentlyContinue).Count -gt 0) {
+    Write-Host "[ok] Playwright browsers ($pwCache)" -ForegroundColor Green
+} else {
+    Write-Host "[missing] Playwright browsers - E2E lane (frontend repos) only; setup-mcp.ps1 installs them when a registered repo declares @playwright/test" -ForegroundColor Yellow
 }
 
 # --- MCP servers declared in .mcp.json ---------------------------------------------

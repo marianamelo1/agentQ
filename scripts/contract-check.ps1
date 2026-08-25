@@ -24,10 +24,11 @@
                      reachability read-only, and records the pact section of the
                      artifact from -PactResults if provided.
 
-    -EnsureTool downloads the pinned oasdiff release only (no diff run).
-    NOTE: the orchestrator asks the developer for consent BEFORE calling this
-    script with -EnsureTool -- it is a network install (CLAUDE.md precondition 5:
-    consented, never silent).
+    -EnsureTool downloads the pinned oasdiff release only (no diff run, no
+    manifest needed). The normal caller is scripts/setup-mcp.ps1 during developer
+    setup -- running setup IS the consent for the network install (CLAUDE.md
+    precondition 5). The on-demand call from schema-diff remains only as a safety
+    net for a machine that skipped setup.
 
     Exit code 0 = the script ran (findings live in the JSON artifact, and breaking
     changes are findings, not failures). Non-zero = the script itself failed.
@@ -35,7 +36,7 @@
 [CmdletBinding()]
 param(
     # Path to run-manifest.json (written by the orchestrator at Phase 0).
-    [Parameter(Mandatory = $true)]
+    # Required for every mode EXCEPT -EnsureTool (validated in Main).
     [string]$Manifest,
 
     [ValidateSet('schema-diff', 'ocelot-diff', 'pact-verify')]
@@ -74,7 +75,16 @@ $ProgressPreference = 'SilentlyContinue'
 $script:OasdiffVersion = '1.29.1'
 $script:RepoRoot       = Split-Path -Parent $PSScriptRoot
 $script:ToolsDir       = Join-Path $script:RepoRoot 'tools'
-$script:OasdiffExe     = Join-Path $script:ToolsDir 'oasdiff.exe'
+# Cross-platform (Windows + macOS/Linux): $IsWindows/$IsMacOS don't exist on
+# Windows PowerShell 5.1, and StrictMode turns a bare reference into a
+# terminating error -- probe the automatic variables instead.
+$script:IsWin = $true
+$script:IsMac = $false
+$__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
+$__macVar = Get-Variable -Name IsMacOS -ErrorAction SilentlyContinue
+if ($null -ne $__macVar) { $script:IsMac = [bool]$__macVar.Value }
+$script:OasdiffExe     = Join-Path $script:ToolsDir $(if ($script:IsWin) { 'oasdiff.exe' } else { 'oasdiff' })
 $script:TempDir        = $null   # set after the manifest is read (lives under workspaceDir)
 
 # ---------------------------------------------------------------------------
@@ -164,9 +174,9 @@ function Invoke-Native {
 
 function Install-Oasdiff {
     # Idempotent: returns 'already-present' or 'installed'.
-    # NOTE: this is a network install. The orchestrator obtains user consent
-    # BEFORE calling with -EnsureTool. The on-demand call from schema-diff is a
-    # safety net for direct/manual invocation with the tool missing.
+    # NOTE: this is a network install. The normal caller is setup-mcp.ps1 during
+    # developer setup (running setup is the consent). The on-demand call from
+    # schema-diff is a safety net for a machine that skipped setup.
     if (Test-Path -LiteralPath $script:OasdiffExe) {
         # Verify the pin, not just presence -- a stale binary from an older setup
         # would change rule ids/levels between machines.
@@ -186,7 +196,17 @@ function Install-Oasdiff {
     [System.Net.ServicePointManager]::SecurityProtocol = `
         [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
-    $asset     = "oasdiff_$($script:OasdiffVersion)_windows_amd64.tar.gz"
+    # Release asset per platform. Windows stays amd64 (x64 emulation covers ARM
+    # Windows); macOS/Linux pick the real architecture (Apple Silicon = arm64).
+    $osPart = if ($script:IsWin) { 'windows' } elseif ($script:IsMac) { 'darwin' } else { 'linux' }
+    $archPart = 'amd64'
+    if (-not $script:IsWin) {
+        try {
+            if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq `
+                [System.Runtime.InteropServices.Architecture]::Arm64) { $archPart = 'arm64' }
+        } catch { }
+    }
+    $asset     = "oasdiff_$($script:OasdiffVersion)_${osPart}_${archPart}.tar.gz"
     $baseUrl   = "https://github.com/oasdiff/oasdiff/releases/download/v$($script:OasdiffVersion)"
     $archive   = Join-Path $script:ToolsDir $asset
     $checksums = Join-Path $script:ToolsDir 'oasdiff-checksums.txt'
@@ -214,16 +234,23 @@ function Install-Oasdiff {
     }
 
     # Extract into a scratch dir and move only the exe, keeping tools/ tidy.
-    # tar.exe ships with Windows 10+ and handles .tar.gz natively.
+    # tar ships with Windows 10+ (tar.exe) and macOS/Linux natively.
     $extractDir = Join-Path $script:ToolsDir 'oasdiff-extract'
     if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -Confirm:$false }
     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-    & tar.exe -xzf $archive -C $extractDir
-    if ($LASTEXITCODE -ne 0) { throw "tar.exe failed (exit $LASTEXITCODE) extracting $asset" }
+    $tarCmd = if ($script:IsWin) { 'tar.exe' } else { 'tar' }
+    & $tarCmd -xzf $archive -C $extractDir
+    if ($LASTEXITCODE -ne 0) { throw "$tarCmd failed (exit $LASTEXITCODE) extracting $asset" }
 
-    $exe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter 'oasdiff.exe' | Select-Object -First 1
-    if ($null -eq $exe) { throw "oasdiff.exe not found inside $asset" }
+    $exeName = if ($script:IsWin) { 'oasdiff.exe' } else { 'oasdiff' }
+    $exe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter $exeName |
+        Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+    if ($null -eq $exe) { throw "$exeName not found inside $asset" }
     Move-Item -LiteralPath $exe.FullName -Destination $script:OasdiffExe -Force
+    if (-not $script:IsWin) {
+        & chmod +x $script:OasdiffExe
+        if ($LASTEXITCODE -ne 0) { throw "chmod +x failed (exit $LASTEXITCODE) on $($script:OasdiffExe)" }
+    }
 
     Remove-Item -LiteralPath $archive, $checksums -Force -Confirm:$false
     Remove-Item -LiteralPath $extractDir -Recurse -Force -Confirm:$false
@@ -357,20 +384,22 @@ function Get-OcelotRouteMap {
 # Main
 # ---------------------------------------------------------------------------
 try {
-    if (-not (Test-Path -LiteralPath $Manifest)) { throw "run manifest not found: $Manifest" }
-    $man          = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
-    $repoPath     = Get-Prop $man 'repoPath'
-    $baseSha      = Get-Prop $man 'baseSha'
-    $workspaceDir = Get-Prop $man 'workspaceDir'
-
     if ($EnsureTool) {
-        # Tool bootstrap only -- no diff, no artifact. Consent was collected by the
-        # orchestrator before this call (network install).
+        # Tool bootstrap only -- no diff, no artifact, no manifest. The normal
+        # caller is setup-mcp.ps1 (running setup is the consent for the network
+        # install); the schema-diff on-demand call is the safety net.
         $status = Install-Oasdiff
         Write-Output ("contract-check: oasdiff v{0} {1} at {2} (sha256 verified against release checksums.txt)" -f `
             $script:OasdiffVersion, $status, $script:OasdiffExe)
         exit 0
     }
+
+    if ([string]::IsNullOrWhiteSpace($Manifest)) { throw '-Manifest is required (all modes except -EnsureTool)' }
+    if (-not (Test-Path -LiteralPath $Manifest)) { throw "run manifest not found: $Manifest" }
+    $man          = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
+    $repoPath     = Get-Prop $man 'repoPath'
+    $baseSha      = Get-Prop $man 'baseSha'
+    $workspaceDir = Get-Prop $man 'workspaceDir'
 
     if (-not $workspaceDir) { throw "manifest is missing workspaceDir" }
     New-Item -ItemType Directory -Force -Path $workspaceDir | Out-Null

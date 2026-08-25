@@ -112,7 +112,11 @@ the plain-language summary live there.
 
 <!-- From mutation-report.json. Absolute survivors only, phrased as
      consequence: "a wrong {{X}} would ship — N tests covering {{file}} still
-     pass when {{mutation}}". Suppress NoCoverage mutants (they are coverage
+     pass when {{mutation}}". When stryker/summary.json carries a
+     testCaseFilter, scope every survivor claim honestly: "no test RELATED TO
+     THIS CHANGE kills it" — never "no test in the project". A fromCache:true
+     run states its verdicts were reused from an identical prior run, not
+     re-executed. Suppress NoCoverage mutants (they are coverage
      findings and belong in the Unit section). Name the assert to strengthen
      when known. If a surviving agentq-N mutant carries a suggestedFix, end
      that finding with: "🧪 Generated fix: strengthens `{{testFile}}`. See

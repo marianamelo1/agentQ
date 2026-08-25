@@ -11,17 +11,33 @@
 # Output:
 #   <workspace>/stryker/summary.json
 #     { projects: [ { project, reportPath, partial, testedMutants, totalMutants,
-#                     killed, survived, noCoverage, timeout, skipped, reason } ] }
+#                     killed, survived, noCoverage, timeout, skipped, reason,
+#                     testCaseFilter, fromCache } ] }
 #   `skipped`/`reason` are additive to the task's field list: the spec requires
 #   recording skip/partial reasons (e.g. the JS lane), and a reasonless skip would
 #   violate "a skipped stage can never read as a pass". All spec-named fields are
 #   emitted verbatim; unknown counts are null, never fabricated zeros.
+#   `testCaseFilter` = the vstest expression the baseline + per-mutant runs were
+#   limited to (null = whole test project); `fromCache` = verdicts reused verbatim
+#   from workspace/<repoSlug>/mutation-cache/ (identical content/scope/filter/
+#   level/tool-version), no Stryker execution this run.
 #
 # Exit code 0 = the script ran (findings live in the artifact); non-zero = the
 # script itself failed. Exactly one summary line is printed to stdout.
 #
 # Guardrails encoded here (each verified  -  see comments at the site of use):
-#   * pinned local dotnet-stryker in the WORKTREE only, never the product repo
+#   * pinned dotnet-stryker: a repo-committed tool manifest wins (restored in the
+#     worktree); otherwise ONE machine-shared install under tools\stryker
+#     (--tool-path, like oasdiff)  -  never installed into the product repo, and
+#     never re-installed per worktree (that cost 1-2 min per fresh worktree)
+#   * test-case-filter (config-only) narrows Stryker's baseline + per-mutant runs
+#     to the diff-related test classes  -  the whole-project baseline dominated the
+#     tier's wall-clock. Consequence consumers MUST respect: a survivor means "no
+#     test RELATED TO THIS CHANGE kills it", never "no test in the project"
+#   * mutation result cache under workspace/<repoSlug>/mutation-cache/, keyed by
+#     source CONTENT hash + scope + filter + level + tool version  -  identical
+#     inputs reuse the prior report verbatim (fromCache=true in summary.json);
+#     timeouts/partials are never cached
 #   * NEVER --since (triple-broken; the documented 7-8h incident)
 #   * -m span globs use CHARACTER offsets, not line numbers; padded + merged;
 #     whole-file fallback when spans yield 0 mutants (span grammar is undocumented)
@@ -33,8 +49,15 @@
 [CmdletBinding()]
 param(
     # Path to run-manifest.json for this run (see scripts/CONTRACTS.md).
-    [Parameter(Mandatory = $true)]
+    # Required for every mode EXCEPT -EnsureTool (validated in main).
     [string]$Manifest,
+
+    # Install/verify the pinned machine-shared dotnet-stryker into tools/stryker
+    # and exit -- no mutation run, no manifest needed. The normal caller is
+    # scripts/setup-mcp.ps1 during developer setup (running setup is the consent
+    # for the network install). A repo pinning its own dotnet-stryker in a
+    # committed tool manifest still wins at run time (restored in the worktree).
+    [switch]$EnsureTool,
 
     # Opt-in thorough mode: mutation-level Standard, whole changed files,
     # no span scoping and no uncovered-region subtraction.
@@ -49,6 +72,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Pinned dotnet-stryker version -- single source of truth (the same branch must
+# produce the same mutants and the same verdict twice). setup-mcp.ps1 installs
+# it via -EnsureTool; check-mcp.ps1 reads this line to verify the pin.
+$script:StrykerVersion = '4.16.0'
+# Cross-platform: $IsWindows doesn't exist on Windows PowerShell 5.1, and
+# StrictMode turns a bare reference into a terminating error -- probe it.
+$script:IsWin = $true
+$__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
+$script:StrykerExeName = if ($script:IsWin) { 'dotnet-stryker.exe' } else { 'dotnet-stryker' }
 
 # ----------------------------------------------------------------------------
 # helpers
@@ -84,17 +118,25 @@ function Write-JsonFileNoBom {
 
 function Stop-ProcessTree {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
-    # WHY taskkill /T: Stryker spawns testhost/vstest child processes; killing only
-    # the parent orphans them mid-mutation and they keep the mutated DLLs locked,
-    # which would break the backup restore below.
-    # WHY via cmd with >nul 2>&1: under $ErrorActionPreference='Stop', PS 5.1 turns
-    # redirected native stderr into a terminating NativeCommandError  -  cmd swallows
-    # taskkill's output (including the benign "not found" race when the process
-    # exited between the timeout check and the kill).
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
-    $ErrorActionPreference = $prev
+    # Stryker spawns testhost/vstest child processes; killing only the parent
+    # orphans them mid-mutation and they keep the mutated DLLs locked, which would
+    # break the backup restore below -- the whole tree must go.
+    if ($script:IsWin) {
+        # WHY taskkill /T via cmd with >nul 2>&1: under $ErrorActionPreference='Stop',
+        # PS 5.1 turns redirected native stderr into a terminating NativeCommandError
+        # -- cmd swallows taskkill's output (including the benign "not found" race
+        # when the process exited between the timeout check and the kill). Windows
+        # PowerShell 5.1 runs on .NET Framework, whose Process.Kill() has no
+        # entire-process-tree overload -- taskkill /T is the only way to reach it.
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+        $ErrorActionPreference = $prev
+    } else {
+        # macOS/Linux run on pwsh 7+ (.NET 6+), where Process.Kill(bool) DOES support
+        # killing the entire process tree in one call -- no shell-out needed.
+        try { [System.Diagnostics.Process]::GetProcessById($ProcessId).Kill($true) } catch { }
+    }
 }
 
 function Invoke-Native {
@@ -343,21 +385,120 @@ function New-ProjectEntry {
         $NoCoverage = $null,
         $TimeoutCount = $null,
         [bool]$Skipped = $false,
-        $Reason = $null
+        $Reason = $null,
+        $TestCaseFilter = $null,
+        [bool]$FromCache = $false
     )
     return [ordered]@{
-        project       = $Project
-        reportPath    = $ReportPath
-        partial       = $Partial
-        testedMutants = $Tested
-        totalMutants  = $Total
-        killed        = $Killed
-        survived      = $Survived
-        noCoverage    = $NoCoverage
-        timeout       = $TimeoutCount
-        skipped       = $Skipped
-        reason        = $Reason
+        project        = $Project
+        reportPath     = $ReportPath
+        partial        = $Partial
+        testedMutants  = $Tested
+        totalMutants   = $Total
+        killed         = $Killed
+        survived       = $Survived
+        noCoverage     = $NoCoverage
+        timeout        = $TimeoutCount
+        skipped        = $Skipped
+        reason         = $Reason
+        # Baseline + per-mutant runs execute ONLY these tests (null = whole test
+        # project). Consumers MUST phrase survivors accordingly: "no test related
+        # to this change kills it", never "no test in the project kills it".
+        testCaseFilter = $TestCaseFilter
+        fromCache      = $FromCache
     }
+}
+
+function Get-AffectedTestClassFilter {
+    # Same heuristic bridge as run-tests.ps1 (independent copy, per this codebase's
+    # self-contained-scripts convention): changed SUT files -> <Base>Tests/<Base>Test,
+    # changed files under the test project's own dir -> their own class names.
+    # WHY: Stryker's baseline + perTest coverage runs execute the WHOLE test project
+    # otherwise  -  on e-conomic that alone dominated the mutation tier's wall-clock.
+    # Returned as a vstest filter expression for the config's test-case-filter.
+    param(
+        [Parameter(Mandatory = $true)]$Prof,
+        [Parameter(Mandatory = $true)][AllowNull()]$DiffSet
+    )
+    if ($null -eq $DiffSet) { return $null }
+    $changed = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @(Get-Prop $DiffSet 'files' @())) {
+        if ([string](Get-Prop $f 'status' '') -eq 'D') { continue }
+        $p = ([string](Get-Prop $f 'path' '')) -replace '\\', '/'
+        if ($p -match '\.cs$') { $changed.Add($p) }
+    }
+    foreach ($u in @(Get-Prop $DiffSet 'untracked' @())) {
+        $p = ([string]$u) -replace '\\', '/'
+        if ($p -match '\.cs$') { $changed.Add($p) }
+    }
+    if ($changed.Count -eq 0) { return $null }
+
+    $sutDirs = @()
+    foreach ($s in @(Get-Prop $Prof 'sutProjects' @())) {
+        $sutDirs += ((([string]$s) -replace '\\', '/') -replace '/[^/]+\.csproj$', '').ToLowerInvariant()
+    }
+    $testProjDir = (((([string](Get-Prop $Prof 'projectPath' '')) -replace '\\', '/')) -replace '/[^/]+\.csproj$', '').ToLowerInvariant()
+
+    $classes = New-Object System.Collections.Generic.List[string]
+    foreach ($path in ($changed | Select-Object -Unique)) {
+        $lower = $path.ToLowerInvariant()
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($path)
+        if ([string]::IsNullOrWhiteSpace($base)) { continue }
+        $underSut = $false
+        foreach ($d in $sutDirs) {
+            if ($d -ne '' -and $lower.StartsWith("$d/")) { $underSut = $true; break }
+        }
+        if ($underSut) {
+            $null = $classes.Add("${base}Tests")
+            $null = $classes.Add("${base}Test")
+            continue
+        }
+        if ($testProjDir -ne '' -and $lower.StartsWith("$testProjDir/")) {
+            $null = $classes.Add($base)
+            if ($base -notmatch '(Tests?|Fixture)$') {
+                $null = $classes.Add("${base}Tests")
+                $null = $classes.Add("${base}Test")
+            }
+        }
+    }
+    $uniq = @($classes | Select-Object -Unique)
+    if ($uniq.Count -eq 0) { return $null }
+    # "~" (contains), never "=": parameterized test names are argument-decorated.
+    return (@($uniq | ForEach-Object { "FullyQualifiedName~$_" }) -join '|')
+}
+
+function Get-MutationCacheKey {
+    # Deterministic cache key: the SAME worktree source content, mutation scope,
+    # test selection, mutation level, and pinned tool version must produce the
+    # SAME mutants and verdicts  -  so a prior report can be reused verbatim.
+    # Content is hashed per in-scope file (span offsets alone are not
+    # collision-safe across content edits).
+    param(
+        [Parameter(Mandatory = $true)]$Run,
+        [Parameter(Mandatory = $true)][string]$WorktreeDir,
+        [Parameter(Mandatory = $true)][string]$MutLevel,
+        [AllowNull()][string]$TestCaseFilter,
+        [Parameter(Mandatory = $true)][string]$StrykerVersion
+    )
+    $sb = New-Object System.Text.StringBuilder
+    $null = $sb.AppendLine("sut=$($Run.SutName)")
+    $null = $sb.AppendLine("testProj=$($Run.TestProjPath)")
+    $null = $sb.AppendLine("level=$MutLevel")
+    $null = $sb.AppendLine("filter=$TestCaseFilter")
+    $null = $sb.AppendLine("stryker=$StrykerVersion")
+    foreach ($g in @($Run.Globs | Sort-Object)) { $null = $sb.AppendLine("glob=$g") }
+    foreach ($rel in @($Run.Files | Sort-Object)) {
+        $abs = Join-Path $WorktreeDir (([string]$rel) -replace '/', [IO.Path]::DirectorySeparatorChar)
+        $h = ''
+        if (Test-Path -LiteralPath $abs -PathType Leaf) {
+            $h = (Get-FileHash -LiteralPath $abs -Algorithm SHA256).Hash
+        }
+        $null = $sb.AppendLine("file=$rel=$h")
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($sb.ToString())
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').Substring(0, 32).ToLowerInvariant() }
+    finally { $sha.Dispose() }
 }
 
 function New-TimeoutEntry {
@@ -385,10 +526,14 @@ function Invoke-OneStryker {
         [string]$LogBase,
         [int]$Cores,
         [int]$TimeoutMs,
-        [string[]]$Globs
+        [string[]]$Globs,
+        # Path to the shared pinned dotnet-stryker.exe (tools\stryker\)  -  empty
+        # means the repo pins its own tool and we go through `dotnet stryker`.
+        [string]$ExePath = ''
     )
     $parts = New-Object 'System.Collections.Generic.List[string]'
-    $parts.Add('stryker')
+    $exe = 'dotnet'
+    if ([string]::IsNullOrWhiteSpace($ExePath)) { $parts.Add('stryker') } else { $exe = $ExePath }
     # config file sits in the test project dir (= cwd), written just before this call
     $parts.Add('-f "stryker-config.json"')
     # WHY --project: a test project referencing several projects makes Stryker's
@@ -405,7 +550,7 @@ function Invoke-OneStryker {
     # instead of Stryker's timestamped default folder.
     $parts.Add(('-O "{0}"' -f $OutDir))
     $argLine = ($parts -join ' ')
-    return (Invoke-Native -FilePath 'dotnet' -Arguments $argLine `
+    return (Invoke-Native -FilePath $exe -Arguments $argLine `
             -WorkingDirectory $Run.TestProjDirAbs -LogBase $LogBase -TimeoutMs $TimeoutMs)
 }
 
@@ -413,7 +558,41 @@ function Invoke-OneStryker {
 # main
 # ----------------------------------------------------------------------------
 try {
+    if ($EnsureTool) {
+        # Tool bootstrap only -- no mutation run, no manifest. Same pinned
+        # machine-shared install that step 1 below performs on demand; doing it
+        # here (from setup-mcp.ps1) means no review ever pauses for a download.
+        $agentQRoot = Split-Path -Parent $PSScriptRoot
+        $sharedToolDir = Join-Path (Join-Path $agentQRoot 'tools') 'stryker'
+        $exePath = Join-Path $sharedToolDir $script:StrykerExeName
+        $present = $false
+        if (Test-Path -LiteralPath $exePath) {
+            # Verify the pin, not just presence -- a stale binary would change
+            # mutants/verdicts between machines. WHY `dotnet tool list` and not
+            # `--version`: dotnet-stryker has no bare --version flag (verified
+            # live: "Missing value for option 'version'"); the tool-path install
+            # metadata is the reliable, offline check.
+            try {
+                $listOut = (& dotnet tool list --tool-path $sharedToolDir) -join "`n"
+                if ($LASTEXITCODE -eq 0 -and $listOut -match ('(?im)^dotnet-stryker\s+' + [regex]::Escape($script:StrykerVersion))) { $present = $true }
+            } catch { }
+        }
+        if ($present) {
+            Write-Output ("stryker-run: dotnet-stryker v{0} already-present at {1}" -f $script:StrykerVersion, $exePath)
+        } else {
+            New-Item -ItemType Directory -Force -Path $sharedToolDir | Out-Null
+            # `tool update` installs when absent and replaces a wrong version.
+            & dotnet tool update dotnet-stryker --version $script:StrykerVersion --tool-path $sharedToolDir
+            if ($LASTEXITCODE -ne 0) {
+                throw "dotnet tool update dotnet-stryker $($script:StrykerVersion) --tool-path $sharedToolDir failed (exit $LASTEXITCODE)"
+            }
+            Write-Output ("stryker-run: dotnet-stryker v{0} installed at {1}" -f $script:StrykerVersion, $exePath)
+        }
+        exit 0
+    }
+
     if ($TimeoutMinutes -lt 1) { throw "-TimeoutMinutes must be >= 1" }
+    if ([string]::IsNullOrWhiteSpace($Manifest)) { throw '-Manifest is required (all modes except -EnsureTool)' }
     if (-not (Test-Path -LiteralPath $Manifest)) { throw "run-manifest not found: $Manifest" }
     $Manifest = (Resolve-Path -LiteralPath $Manifest).ProviderPath
 
@@ -487,7 +666,7 @@ try {
     # script. Fail fast and loud when that reset was skipped.
     $dirtyMutantFiles = @()
     foreach ($cf in $changedCs) {
-        $abs = Join-Path $worktreeDir (([string]$cf.Path) -replace '/', '\')
+        $abs = Join-Path $worktreeDir (([string]$cf.Path) -replace '/', [IO.Path]::DirectorySeparatorChar)
         if ((Test-Path -LiteralPath $abs -PathType Leaf) -and
             (Select-String -LiteralPath $abs -Pattern 'AGENTQ_MUTANT' -Quiet)) {
             $dirtyMutantFiles += [string]$cf.Path
@@ -528,7 +707,7 @@ try {
         $testProjDirRel = ''
         if ($li -ge 0) { $testProjDirRel = $testProjRel.Substring(0, $li) }
         $testProjDirAbs = $worktreeDir
-        if ($testProjDirRel -ne '') { $testProjDirAbs = Join-Path $worktreeDir ($testProjDirRel -replace '/', '\') }
+        if ($testProjDirRel -ne '') { $testProjDirAbs = Join-Path $worktreeDir ($testProjDirRel -replace '/', [IO.Path]::DirectorySeparatorChar) }
         if (-not (Test-Path -LiteralPath $testProjDirAbs -PathType Container)) {
             $entries.Add((New-ProjectEntry -Project $testProjRel -Skipped $true `
                         -Reason 'test project directory not found in the worktree  -  re-run worktree.ps1 -Ensure'))
@@ -546,6 +725,10 @@ try {
         }
 
         $testName = [System.IO.Path]::GetFileNameWithoutExtension($testProjRel)
+        # Baseline + per-mutant test selection: only the test classes related to
+        # this diff (see Get-AffectedTestClassFilter). $null = no derivation
+        # possible -> whole test project (stated in the entry, never silent).
+        $testCaseFilter = Get-AffectedTestClassFilter -Prof $prof -DiffSet $diffSet
         $candRuns = @()
         $filesSeen = 0
         $droppedByCov = 0
@@ -571,7 +754,7 @@ try {
                 $uncov = $null
                 $ck = $cf.Path.ToLowerInvariant()
                 if ($uncoveredMap.ContainsKey($ck)) { $uncov = $uncoveredMap[$ck] }
-                $absPath = Join-Path $worktreeDir ($cf.Path -replace '/', '\')
+                $absPath = Join-Path $worktreeDir ($cf.Path -replace '/', [IO.Path]::DirectorySeparatorChar)
                 $g = Get-FileMutateGlobs -File $cf -RelPath $relPath -UncoveredLines $uncov `
                     -SpanScope $spanScope -AbsPath $absPath
                 if ($g.DroppedByCoverage) { $droppedByCov++; continue }
@@ -582,7 +765,8 @@ try {
             }
             if ($globs.Count -eq 0) { continue }
             $sutName = $sutRel.Substring($sutRel.LastIndexOf('/') + 1)
-            $candRuns += , @{ SutName = $sutName; Globs = $globs; WholeFileGlobs = $wholeGlobs; UsedSpans = $usedSpans }
+            $candRuns += , @{ SutName = $sutName; Globs = $globs; WholeFileGlobs = $wholeGlobs; UsedSpans = $usedSpans
+                              Files = @($inScope | ForEach-Object { [string]$_.Path }) }
         }
 
         if ($candRuns.Count -eq 0) {
@@ -619,47 +803,68 @@ try {
                     Globs          = $cr.Globs
                     WholeFileGlobs = $cr.WholeFileGlobs
                     UsedSpans      = $cr.UsedSpans
+                    Files          = $cr.Files
+                    TestCaseFilter = $testCaseFilter
                     Key            = $key
                 })
         }
     }
 
-    # ---------------- step 1: pinned local tool, WORKTREE only ----------------
+    # ---------------- step 1: resolve the pinned stryker tool ----------------
+    # A repo that pins its own dotnet-stryker in a committed tool manifest wins
+    # (reproducibility of the repo's own setup beats our pin): restore it and go
+    # through `dotnet stryker`. Otherwise: ONE machine-shared install under
+    # tools\stryker (exactly like the pinned oasdiff)  -  no per-worktree manifest
+    # creation, no per-worktree install/restore (verified live: that cost 1-2 min
+    # on every fresh worktree). The install is a network fetch, covered by the
+    # same mutation consent that always covered it. WHY the version pin: the same
+    # branch must produce the same mutants and the same verdict twice.
+    $strykerVersion = $script:StrykerVersion
+    $strykerExePath = ''
     if ($plannedRuns.Count -gt 0) {
         $toolLogBase = Join-Path $logsDir 'tool'
-        $toolsManifestPath = Join-Path $worktreeDir '.config\dotnet-tools.json'
-        $hasStryker = $false
+        $toolsManifestPath = Join-Path (Join-Path $worktreeDir '.config') 'dotnet-tools.json'
+        $repoPinsStryker = $false
         if (Test-Path -LiteralPath $toolsManifestPath) {
             $tm = Read-JsonFile -Path $toolsManifestPath
             $tools = Get-Prop $tm 'tools'
-            # If the repo pins its own dotnet-stryker version we respect that pin  - 
-            # reproducibility of the repo's own setup beats our preferred version.
-            if ($null -ne $tools -and $null -ne (Get-Prop $tools 'dotnet-stryker')) { $hasStryker = $true }
+            if ($null -ne $tools -and $null -ne (Get-Prop $tools 'dotnet-stryker')) { $repoPinsStryker = $true }
+        }
+        if ($repoPinsStryker) {
+            $r = Invoke-Native -FilePath 'dotnet' -Arguments 'tool restore' `
+                -WorkingDirectory $worktreeDir -LogBase "$toolLogBase-restore" -TimeoutMs $timeoutMs
+            if ($r.TimedOut -or $r.ExitCode -ne 0) {
+                throw "dotnet tool restore failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
+            }
         }
         else {
-            # WHY no --force: `dotnet new tool-manifest --force` would clobber a committed
-            # manifest and its pinned tools  -  FORBIDDEN. Create only when absent, and only
-            # under the worktree (the product repo is read-only, always).
-            $r = Invoke-Native -FilePath 'dotnet' -Arguments 'new tool-manifest' `
-                -WorkingDirectory $worktreeDir -LogBase "$toolLogBase-manifest" -TimeoutMs $timeoutMs
-            if ($r.TimedOut -or $r.ExitCode -ne 0) {
-                throw "dotnet new tool-manifest failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
+            $agentQRoot = Split-Path -Parent $PSScriptRoot
+            $sharedToolDir = Join-Path (Join-Path $agentQRoot 'tools') 'stryker'
+            $strykerExePath = Join-Path $sharedToolDir $script:StrykerExeName
+            $needInstall = $true
+            if (Test-Path -LiteralPath $strykerExePath) {
+                # Verify the pin, not just presence (same rule as oasdiff)  -  a
+                # stale binary would change mutants/verdicts between machines.
+                # WHY `dotnet tool list` and not `--version`: dotnet-stryker has
+                # no bare --version flag (verified live: "Missing value for
+                # option 'version'" and a failed check re-ran the network install
+                # on every run); the tool-path metadata is the offline check.
+                $v = Invoke-Native -FilePath 'dotnet' -Arguments ('tool list --tool-path "{0}"' -f $sharedToolDir) `
+                    -WorkingDirectory $agentQRoot -LogBase "$toolLogBase-version" -TimeoutMs 60000
+                $vText = ''
+                if (Test-Path -LiteralPath $v.OutLog) { $vText = Get-Content -LiteralPath $v.OutLog -Raw }
+                if (-not $v.TimedOut -and $v.ExitCode -eq 0 -and $vText -match ('(?im)^dotnet-stryker\s+' + [regex]::Escape($strykerVersion))) { $needInstall = $false }
             }
-        }
-        if (-not $hasStryker) {
-            # WHY the version pin: reproducible verdicts  -  the same branch must produce
-            # the same mutants and the same verdict twice. A floating tool version can't.
-            $r = Invoke-Native -FilePath 'dotnet' -Arguments 'tool install dotnet-stryker --version 4.16.0' `
-                -WorkingDirectory $worktreeDir -LogBase "$toolLogBase-install" -TimeoutMs $timeoutMs
-            if ($r.TimedOut -or $r.ExitCode -ne 0) {
-                throw "dotnet tool install dotnet-stryker 4.16.0 failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
+            if ($needInstall) {
+                New-Item -ItemType Directory -Force -Path $sharedToolDir | Out-Null
+                # `tool update` installs when absent and replaces a wrong version.
+                $r = Invoke-Native -FilePath 'dotnet' `
+                    -Arguments ('tool update dotnet-stryker --version {0} --tool-path "{1}"' -f $strykerVersion, $sharedToolDir) `
+                    -WorkingDirectory $agentQRoot -LogBase "$toolLogBase-install" -TimeoutMs $timeoutMs
+                if ($r.TimedOut -or $r.ExitCode -ne 0) {
+                    throw "dotnet tool update dotnet-stryker $strykerVersion --tool-path $sharedToolDir failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
+                }
             }
-        }
-        # always restore, so the pinned tool is materialized on this machine
-        $r = Invoke-Native -FilePath 'dotnet' -Arguments 'tool restore' `
-            -WorkingDirectory $worktreeDir -LogBase "$toolLogBase-restore" -TimeoutMs $timeoutMs
-        if ($r.TimedOut -or $r.ExitCode -ne 0) {
-            throw "dotnet tool restore failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
         }
     }
 
@@ -686,24 +891,58 @@ try {
     # ---------------- step 5: invoke per test project, sequentially ----------------
     # WHY sequential: CPU-heavy phases must never overlap  -  Stryker's Timeout verdicts
     # are load-sensitive; parallel runs manufacture false reds (CLAUDE.md).
+    $cacheDir = Join-Path (Split-Path -Parent $workspaceDir) 'mutation-cache'
     foreach ($run in $plannedRuns) {
         $outDir = Join-Path $strykerRoot $run.Key
         # WHY pre-create -O: Stryker validates the output dir exists and errors out
         # otherwise (verified)  -  it does not create it for you.
         New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-        # config written into the WORKTREE copy of the test project dir  -  overwriting a
-        # committed stryker-config.json here touches only the worktree, never the repo
-        $cfgPath = Join-Path $run.TestProjDirAbs 'stryker-config.json'
-        Write-JsonFileNoBom -Object $strykerConfig -Path $cfgPath
-
         $logBase = Join-Path $logsDir $run.Key
         $reportPath = Join-Path (Join-Path $outDir 'reports') 'mutation-report.json'
         # idempotency: a stale report from a previous run must never be read as this run's
         if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force }
 
+        # ---- cache check: identical source content + scope + test filter + tool
+        # version was mutated before -> reuse that report verbatim (deterministic:
+        # same inputs, same mutants, same verdicts). Repo-level, branch-agnostic
+        # (keyed by file CONTENT hash, per the warm-start principles).
+        $cacheKey = Get-MutationCacheKey -Run $run -WorktreeDir $worktreeDir -MutLevel $mutLevel `
+            -TestCaseFilter $run.TestCaseFilter -StrykerVersion $strykerVersion
+        $cachedReportPath = Join-Path $cacheDir "$cacheKey.report.json"
+        if (Test-Path -LiteralPath $cachedReportPath) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $reportPath) | Out-Null
+            Copy-Item -LiteralPath $cachedReportPath -Destination $reportPath -Force
+            $counts = Read-MutationCounts -ReportPath $reportPath
+            if ($null -ne $counts) {
+                $tested = $counts.Killed + $counts.Survived + $counts.Timeout
+                $entries.Add((New-ProjectEntry -Project $run.TestProjPath -ReportPath $reportPath `
+                            -Tested $tested -Total $counts.Total -Killed $counts.Killed -Survived $counts.Survived `
+                            -NoCoverage $counts.NoCoverage -TimeoutCount $counts.Timeout `
+                            -TestCaseFilter $run.TestCaseFilter -FromCache $true `
+                            -Reason "cache hit  -  identical source content, mutation scope, test filter, and tool version were mutated before; verdicts reused verbatim from mutation-cache\$cacheKey.report.json"))
+                continue
+            }
+            # unreadable cached report: fall through to a real run (never trust a husk)
+        }
+
+        # config written into the WORKTREE copy of the test project dir  -  overwriting a
+        # committed stryker-config.json here touches only the worktree, never the repo.
+        # test-case-filter is per run: baseline + per-mutant executions run ONLY the
+        # diff-related test classes (the whole-project baseline dominated the tier's
+        # wall-clock  -  verified live); no derivable classes -> whole project, stated.
+        $inner = $strykerConfig['stryker-config']
+        if (-not [string]::IsNullOrWhiteSpace([string]$run.TestCaseFilter)) {
+            $inner['test-case-filter'] = [string]$run.TestCaseFilter
+        }
+        elseif ($inner.Contains('test-case-filter')) {
+            $inner.Remove('test-case-filter')
+        }
+        $cfgPath = Join-Path $run.TestProjDirAbs 'stryker-config.json'
+        Write-JsonFileNoBom -Object $strykerConfig -Path $cfgPath
+
         $res = Invoke-OneStryker -Run $run -OutDir $outDir -LogBase $logBase `
-            -Cores $cores -TimeoutMs $timeoutMs -Globs $run.Globs
+            -Cores $cores -TimeoutMs $timeoutMs -Globs $run.Globs -ExePath $strykerExePath
         if ($res.TimedOut) {
             $null = Restore-StrykerBackup -Root $worktreeDir
             $entries.Add((New-TimeoutEntry -Project $run.TestProjPath `
@@ -721,7 +960,7 @@ try {
             $note = 'span globs produced 0 mutants  -  fell back to whole-file globs'
             if (Test-Path -LiteralPath $reportPath) { Remove-Item -LiteralPath $reportPath -Force }
             $res = Invoke-OneStryker -Run $run -OutDir $outDir -LogBase "$logBase-fallback" `
-                -Cores $cores -TimeoutMs $timeoutMs -Globs $run.WholeFileGlobs
+                -Cores $cores -TimeoutMs $timeoutMs -Globs $run.WholeFileGlobs -ExePath $strykerExePath
             if ($res.TimedOut) {
                 $null = Restore-StrykerBackup -Root $worktreeDir
                 $entries.Add((New-TimeoutEntry -Project $run.TestProjPath `
@@ -739,12 +978,34 @@ try {
             continue
         }
 
+        # ---- cache store: only a COMPLETE run is cached (a timeout/partial result
+        # must be re-attempted next time, never replayed as if it were whole).
+        New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+        Copy-Item -LiteralPath $reportPath -Destination $cachedReportPath -Force
+        $metaFiles = New-Object System.Collections.Generic.List[object]
+        foreach ($rel in @($run.Files | Sort-Object)) {
+            $abs = Join-Path $worktreeDir (([string]$rel) -replace '/', [IO.Path]::DirectorySeparatorChar)
+            $h = ''
+            if (Test-Path -LiteralPath $abs -PathType Leaf) { $h = (Get-FileHash -LiteralPath $abs -Algorithm SHA256).Hash }
+            $metaFiles.Add([ordered]@{ path = $rel; sha256 = $h })
+        }
+        Write-JsonFileNoBom -Object ([ordered]@{
+                createdAt      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                testProject    = $run.TestProjPath
+                sutProject     = $run.SutName
+                mutationLevel  = $mutLevel
+                testCaseFilter = $run.TestCaseFilter
+                strykerVersion = $strykerVersion
+                files          = @($metaFiles.ToArray())
+            }) -Path (Join-Path $cacheDir "$cacheKey.meta.json")
+
         # testedMutants = mutants that actually had tests executed against them;
         # NoCoverage/Ignored/CompileError never ran a test.
         $tested = $counts.Killed + $counts.Survived + $counts.Timeout
         $entries.Add((New-ProjectEntry -Project $run.TestProjPath -ReportPath $reportPath `
                     -Tested $tested -Total $counts.Total -Killed $counts.Killed -Survived $counts.Survived `
-                    -NoCoverage $counts.NoCoverage -TimeoutCount $counts.Timeout -Reason $note))
+                    -NoCoverage $counts.NoCoverage -TimeoutCount $counts.Timeout -Reason $note `
+                    -TestCaseFilter $run.TestCaseFilter))
     }
 
     # final sweep even on non-timeout paths: Restore() is not crash-safe, and a leftover
@@ -762,7 +1023,7 @@ try {
         # an nx project file  -  StrykerJS must run from the package directory
         $ppTrim = $pp.TrimEnd('/')
         $projDirRel = $ppTrim
-        $cand = Join-Path $worktreeDir ($ppTrim -replace '/', '\')
+        $cand = Join-Path $worktreeDir ($ppTrim -replace '/', [IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $cand -PathType Container)) {
             $li3 = $ppTrim.LastIndexOf('/')
             if ($li3 -ge 0) { $projDirRel = $ppTrim.Substring(0, $li3) } else { $projDirRel = '' }
@@ -784,7 +1045,7 @@ try {
         }
 
         $projDirAbs = $worktreeDir
-        if ($projDirRel -ne '') { $projDirAbs = Join-Path $worktreeDir ($projDirRel -replace '/', '\') }
+        if ($projDirRel -ne '') { $projDirAbs = Join-Path $worktreeDir ($projDirRel -replace '/', [IO.Path]::DirectorySeparatorChar) }
 
         # WHY the devDependency gate: agentQ never adds packages to (or edits the
         # package.json of) a product repo, and a floating npx install would be exactly that.
@@ -809,7 +1070,9 @@ try {
         $logBase = Join-Path $logsDir $logKey
 
         # idempotency: clear stale JS reports so a previous run's file is never re-read
-        $jsReportCandidates = @('reports\mutation\mutation.json', 'reports\mutation\mutation-report.json')
+        # Forward slashes: both Windows and macOS/Linux path APIs accept them, unlike
+        # the reverse (a literal '\' is just an ordinary filename character on Unix).
+        $jsReportCandidates = @('reports/mutation/mutation.json', 'reports/mutation/mutation-report.json')
         foreach ($candRel in $jsReportCandidates) {
             $p2 = Join-Path $projDirAbs $candRel
             if (Test-Path -LiteralPath $p2) { Remove-Item -LiteralPath $p2 -Force }
@@ -818,10 +1081,18 @@ try {
         # --incremental: StrykerJS's own supported diff cache (unlike .NET's broken --since).
         # --reporters json,progress is added on top of the spec's command line because the
         # json report is the only machine-readable source for summary.json counts.
-        # WHY cmd.exe: npx is a .cmd shim  -  cmd resolves it reliably under Start-Process.
-        $jsArgLine = ('/d /c npx stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
-        $res = Invoke-Native -FilePath 'cmd.exe' -Arguments $jsArgLine `
-            -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
+        $strykerArgs = ('stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
+        if ($script:IsWin) {
+            # WHY cmd.exe: npx is a .cmd shim on Windows  -  cmd resolves it reliably
+            # under Start-Process (Start-Process can't invoke a shim directly).
+            $res = Invoke-Native -FilePath 'cmd.exe' -Arguments "/d /c npx $strykerArgs" `
+                -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
+        } else {
+            # macOS/Linux: npx is a real executable  -  .NET resolves it via PATH
+            # directly, no shell wrapper needed.
+            $res = Invoke-Native -FilePath 'npx' -Arguments $strykerArgs `
+                -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
+        }
         if ($res.TimedOut) {
             $entries.Add((New-TimeoutEntry -Project $pp `
                         -Prog (Read-ConsoleProgress -LogPath $res.OutLog) -Minutes $TimeoutMinutes))
