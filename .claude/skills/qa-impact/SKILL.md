@@ -44,13 +44,18 @@ Same four optional slots as `/qa-review` (`--branch` / `--repo` / `--worktree` /
    coverage artifact **if a prior `/qa-review` produced one**; otherwise that lane
    is `SKIPPED — no coverage artifact (run /qa-review to get it)`. Never generate
    coverage from this skill.
-4. **Testomat lane (session-dependent)** — probe whether a Testomatio MCP server
-   is available **in this session** (attempt tool discovery; the server is
-   pre-declared in this repo's `.mcp.json` but needs `TESTOMATIO_API_TOKEN` set on
-   the machine — do NOT assume it works because it works elsewhere). Unavailable →
+4. **Testomat lane (session-dependent)** — probe with the REAL seed query, not
+   bare tool discovery: the server is pre-declared in this repo's `.mcp.json` but
+   needs `TESTOMATIO_API_TOKEN` set on the machine (do NOT assume it works
+   because it works elsewhere), AND that token can be read-only — connects fine
+   (`system_ping` OK) yet 403s on `tests_list`/`tests_search`, which is a
+   distinct state from "not configured" and must be reported as such, not
+   guessed at ad hoc. No MCP →
    `SKIPPED — Testomatio MCP not configured` plus a one-line enable hint (set
    `TESTOMATIO_API_TOKEN` as an OS env var and approve the server — never in
-   `.env`). Available →
+   `.env`). Query 403s (read-only token) → `DEGRADED — Testomatio token is
+   read-only` — a fixed string, so this reads the same on every run. Query
+   succeeds →
    search tests/suites by the seeds and the ticket's component; every hit is a
    **candidate (keyword match)** — never "affected". Either way, ALWAYS write
    `testomat-candidates.json` (CONTRACTS.md) — `status` carries the honesty.

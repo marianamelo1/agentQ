@@ -69,8 +69,13 @@ intent, then map onto these four slots:
    resolved. Zero → say what was checked and ask. Multiple → list each
    `repoSlug`/`branch`/`repoPath` and ask which one.
    Then run `scripts/worktree.ps1 -Heal -RepoPath <path>` then
-   `-EnsureWorkspace` to create `workspace/<repo>/<branch>/` and write
-   `run-manifest.json` (pin the base SHA once — never re-resolve). Probe
+   `-EnsureWorkspace -RepoSlug <candidate's repoSlug> -Branch <candidate's branch>
+   -RepoPath <candidate's repoPath> [-TicketKey <KEY, if known>]` — all three of
+   `-RepoSlug`/`-Branch`/`-RepoPath` are required (the script throws otherwise);
+   take them verbatim from the resolved candidate above, not the registered
+   config path, since a `git worktree add` sibling's `repoPath` differs from it —
+   to create `workspace/<repo>/<branch>/` and write `run-manifest.json` (pin the
+   base SHA once — never re-resolve). Probe
    SDK/node/docker. First run on a repo → offer the one-time setup (Stryker tool
    restore, oasdiff download) as a consented step; declining just narrows lanes.
 2. **Intake** — delegate to `qa-intake` with the manifest path. It writes
@@ -109,25 +114,30 @@ intent, then map onto these four slots:
    status). Otherwise the script writes seeds from the diff set (scans
    `productRepos` ∪ `testRepos` — the UI-automation/BA repo lives in the latter) →
    `impact-index.json`. If `skipQaImpact` itself is `false`, also consult Testomat
-   for cross-repo candidates: probe whether a Testomatio
-   MCP is available in THIS session (pre-declared in `.mcp.json`, but its
-   `TESTOMATIO_API_TOKEN` is per-machine — never assume it's working); available →
-   search tests/suites by the seeds + ticket
+   for cross-repo candidates: probe with the REAL seed query, not bare
+   connectivity — a Testomatio MCP pre-declared in `.mcp.json` can connect fine
+   (`system_ping` OK) while its per-machine `TESTOMATIO_API_TOKEN` is read-only
+   and 403s on `tests_list`/`tests_search`; classify that distinctly from "not
+   configured" → search tests/suites by the seeds + ticket
    component; ALWAYS write `testomat-candidates.json` when `skipQaImpact` is false
    (status `SKIPPED — Testomatio
-   MCP not configured` when absent). Stream one line ("Impact: client 4 refs · 3 BA
+   MCP not configured` when no MCP; `DEGRADED — Testomatio token is read-only`
+   when the query 403s — a fixed string, not ad hoc wording, so the same failure
+   reads the same way on every run). Stream one line ("Impact: client 4 refs · 3 BA
    specs"). Overlaps step 3; a failure here degrades the
    Impact row only, nothing else.
 2c. **Manual test recommendation (gated by `toggles.skipManualTestAnalysis`,
    default `false` — opt-**out**, unlike 2b which is opt-in)** — needs step 2b's
    seeds (`impact-index.json`, which ran above even if `skipQaImpact` skipped the
    Impact map itself). Toggle `true` → record `SKIPPED — disabled by config
-   (skipManualTestAnalysis)` and skip. Otherwise, same Testomatio MCP probe as 2b;
-   available → two TQL queries, both `state == 'manual'`: one OR-ing the seed
+   (skipManualTestAnalysis)` and skip. Otherwise, same Testomatio MCP probe as 2b
+   (real query, not connectivity); available → two TQL queries, both `state ==
+   'manual'`: one OR-ing the seed
    values, one on `jira == '<ticketKey>'` if a ticket key exists → write
    `manual-test-candidates.json`, ranking seed matches (`diff-seed`) above
-   ticket-only matches (`ticket-link`), capped at 5. Absent MCP → the same file
-   with `status: "SKIPPED — Testomatio MCP not configured"`. Stream one line
+   ticket-only matches (`ticket-link`), capped at 5. No MCP → the same file
+   with `status: "SKIPPED — Testomatio MCP not configured"`; read-only-token 403 →
+   `status: "DEGRADED — Testomatio token is read-only"`. Stream one line
    ("Manual testing: 2 candidates — see report"). Overlaps step 3; a failure here
    degrades this lane only.
 3. **Unit** (skipped under `--quick`) — issue

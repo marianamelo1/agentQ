@@ -215,6 +215,16 @@ entry with `skippedReason` (e.g. a solution-wide suite with nothing diff-relevan
 always carries `exitCode: 0` and `zeroMatchError: false` so risk-score's
 build-failed heuristic cannot misread an honest skip.
 
+A .NET project build failure (before any test runs) is its own run entry:
+`testsExecuted: 0`, a single `failures` item with `fqn: "<build>"` and
+`message` set to the actual `dotnet build` diagnostic text (the real
+compiler errors, e.g. `error CS0234: ...` — never a generic placeholder
+string). This matters most for the `-GeneratedOnly -WorktreeRoot
+<worktreeBaseDir>` anti-vacuity run: a base-side build failure that names a
+symbol the diff adds is strong non-vacuity evidence (see `vacuityGrade:
+"verified_non_compiling_on_base"` above), so the real diagnostic has to be
+readable from the artifact, not discarded.
+
 **JS selection is file-granular, always** (every JS runner incl. Nx): per
 project, `jest --findRelatedTests <changed files under the project>` with the
 project's own jest.config, per-test JSON at `jest-results-<projKey>.json`,
@@ -305,7 +315,7 @@ no Stryker execution this run). Two consumer rules bind:
   "targetProject": "<projectPath from adapter-profiles>",
   "renderedTo": ["worktree-relative path of generated test file — the physical file lives in <workspaceDir>/generated/<that path> (the staging dir; see the generated/ section above), and worktree.ps1 materializes it into both worktrees"],
   "executionState": "EXECUTED_PASSED" | "EXECUTED_FAILED" | "GENERATED_NOT_EXECUTED" | null,
-  "vacuityGrade": "verified_against_base" | "static_only" | null
+  "vacuityGrade": "verified_against_base" | "verified_non_compiling_on_base" | "static_only" | null
 }
 ```
 `level: "unit"` is for a scenario that calls a function/module directly with no
@@ -313,6 +323,17 @@ render, no DB, no HTTP — e.g. asserting an invariant on a pure helper's return
 value (verified case: a column-header-uniqueness check with no React render
 involved). `component` implies rendering/DOM or a real internal collaborator;
 don't use it just because the target file lives under a "components/" folder.
+
+`vacuityGrade: "verified_non_compiling_on_base"` is for the base-side run's
+failing entry being a BUILD failure (no test executed) whose compiler diagnostic
+names a symbol the diff itself adds — the generated test can't even exist
+without the branch's change, which is *stronger* non-vacuity evidence than a
+plain runtime failure. It is NOT the right grade for a base build that fails for
+reasons unrelated to the diff (an unrelated missing package, a pre-existing
+broken base) — that's a base-environment problem, not vacuity evidence, and
+earns no `vacuityGrade` at all (leave `null`, raise it as its own finding
+instead). Telling the two apart means reading the real compiler text: see
+`test-results.json`'s `failures[].message` note below.
 
 `executionState`/`vacuityGrade` are absent (`null`) when qa-scenario-writer first
 writes the file — it doesn't know the outcome yet. The **orchestrator** fills them
@@ -472,13 +493,19 @@ the orchestrator (the MCP may not exist on a given machine) and land in
 ## testomat-candidates.json  (orchestrator, Phase 1b — session-dependent, ALWAYS written)
 Written by the orchestrator, not a script: Testomatio's MCP server is pre-declared
 in `.mcp.json` but needs a per-machine `TESTOMATIO_API_TOKEN`, so availability
-differs per machine. Probe first; never assume. The file is written
+differs per machine. Probe with the real seed query itself, never with
+connectivity alone — a read-only token authenticates fine (`system_ping`
+succeeds) but 403s on `tests_list`/`tests_search`, which is a distinct,
+NAMED state (`DEGRADED — Testomatio token is read-only`), not the generic
+"not configured" skip and not folded into the generic query-error DEGRADED
+either — a fixed string keeps this reading the same across runs instead of
+each run improvising its own wording. The file is written
 whenever the impact phase runs (`toggles.skipQaImpact: false`, or the standalone
 `/qa-impact`) — `status` carries the honesty when the lane couldn't run. It does
 not exist on runs where `skipQaImpact` (default `true`) skipped the phase.
 ```json
 {
-  "status": "RAN",   // "RAN" | "SKIPPED — Testomatio MCP not configured" | "DEGRADED — <query error>"
+  "status": "RAN",   // "RAN" | "SKIPPED — Testomatio MCP not configured" | "DEGRADED — Testomatio token is read-only" | "DEGRADED — <query error>"
   "queriedBy": ["POST /api/entries", "ticket component: Entries"],
   "candidates": [
     { "id": "T1a2b3c", "title": "Create entry with posting date", "suite": "Entries",
@@ -504,7 +531,7 @@ writes whenever either toggle needs them (see that section). Queries Testomat fo
 `testomat-candidates.json`, which searches all tests regardless of automation state.
 ```json
 {
-  "status": "RAN",   // "RAN" | "SKIPPED — Testomatio MCP not configured" | "SKIPPED — disabled by config (skipManualTestAnalysis)" | "DEGRADED — <query error>"
+  "status": "RAN",   // "RAN" | "SKIPPED — Testomatio MCP not configured" | "SKIPPED — disabled by config (skipManualTestAnalysis)" | "DEGRADED — Testomatio token is read-only" | "DEGRADED — <query error>"
   "queriedBy": { "seeds": ["POST /api/entries"], "ticket": "EC-1234" },
   "candidates": [
     { "id": "de8c0276", "title": "Disconnect the employee after connecting an existing registration user",

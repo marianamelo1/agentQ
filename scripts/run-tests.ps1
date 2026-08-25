@@ -709,13 +709,33 @@ try {
             # (never a .sln  -  e-conomic's is 426 projects).
             if (-not $builtProjects.Contains($projAbs)) {
                 $buildArgs = @('build', $projAbs, '-c', 'Debug', '-v:m', '--nologo')
-                & dotnet @buildArgs
+                # WHY Tee-Object (not `2>&1`): capture the real diagnostic text
+                # for the artifact while still streaming to the console, without
+                # touching stderr -- PS 5.1 wraps redirected native stderr in
+                # ErrorRecords, which $ErrorActionPreference='Stop' can promote
+                # to a terminating error (same hazard noted elsewhere in this
+                # file). MSBuild writes its errors to stdout regardless of
+                # verbosity, so stdout alone is sufficient.
+                $buildOutputLines = @()
+                & dotnet @buildArgs | Tee-Object -Variable buildOutputLines
                 if ($LASTEXITCODE -ne 0) {
+                    # Surface the ACTUAL compiler diagnostic (e.g. "error
+                    # CS0234: X does not exist...") instead of an opaque
+                    # placeholder: this is what lets a consumer (qa-analyst
+                    # grading anti-vacuity) tell "this base build fails because
+                    # the generated test references a branch-new symbol"
+                    # (strong non-vacuity evidence) apart from a genuine,
+                    # unrelated base-side breakage.
+                    $errorLines = @($buildOutputLines) | Where-Object { $_ -match '\berror\b' }
+                    $buildMessage = if ($errorLines.Count -gt 0) { ($errorLines | Select-Object -First 40) -join "`n" }
+                                    else { (@($buildOutputLines) | Select-Object -Last 40) -join "`n" }
+                    if ([string]::IsNullOrWhiteSpace($buildMessage)) { $buildMessage = 'dotnet build failed (no output captured)' }
+                    if ($buildMessage.Length -gt 4000) { $buildMessage = $buildMessage.Substring(0, 4000) + ' ... (truncated)' }
                     $null = $runs.Add([ordered]@{
                         projectPath = $projRel; command = "dotnet $($buildArgs -join ' ')"; exitCode = $LASTEXITCODE
                         testsDiscovered = 0; testsExecuted = 0; passed = 0; failed = 0; skipped = 0
                         zeroMatchError = $false; durationSeconds = 0.0
-                        failures = @(@{ fqn = '<build>'; message = 'dotnet build failed'; stack = '' })
+                        failures = @(@{ fqn = '<build>'; message = $buildMessage; stack = '' })
                         perTestDurations = @(); trxPath = $null
                     })
                     continue
