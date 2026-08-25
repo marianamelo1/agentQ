@@ -206,6 +206,15 @@ elapsed time (including any stall) is always what lands in `time-ledger.json` �
 never zeroed out or approximated away, even when the cause is infrastructure
 flakiness rather than agentQ's own work.
 
+- Lean orchestrator turns: deterministic script sequences with zero judgment
+  between them (`merge-mutation-reports.ps1` → `risk-score.ps1`; the preflight
+  `-Heal` → `-EnsureWorkspace` → `-DiffSet` trio; the report's ledger-append →
+  `render-evidence.ps1` → BOM re-save) run as ONE chained command, not N
+  round-trips, and `scripts/report-pack.ps1` mechanically assembles an agent
+  dispatch's inline evidence pack instead of the orchestrator hand-composing
+  it — verified live (2026-08-25) that hand-composing was one of the longest
+  single orchestrator turns in a run, and that a heavier orchestrator context
+  correlates with mid-run compaction risk (one froze a run for ~3.5 minutes).
 - Do less, not faster: affected-subset tests only, at TEST-CLASS granularity —
   filters derive from both sides of the diff (SUT files → `<Class>Tests`, changed
   test-project files → their own class names, untracked files included); a profile

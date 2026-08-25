@@ -651,6 +651,35 @@ two stalled dispatches as `0.0 seconds` and hid 52 minutes of real run time from
 the developer). If a stall's exact duration genuinely cannot be reconstructed,
 record the best available estimate and say so in `outcome` — never a bare zero.
 
+## report-pack.ps1 output  (stdout only — not a persisted artifact)
+Phase D2 of the run-time reduction work: assembles the inline evidence pack
+for an agent dispatch, mechanically, instead of the orchestrator hand-
+composing ~2 pages of curated content from 5+ artifacts every run (verified
+live 2026-08-25 to be one of the longest single orchestrator turns in a run).
+Two modes, selected by `-For`:
+- `-For report` (default): everything `qa-report-synthesizer` needs —
+  run identity, execution summary (unit/coverage/mutation/generated-tests/
+  contract/impact/manual-testing/risk-score, each an honest "not available
+  this run" line when its artifact is missing), findings, acceptance
+  criteria, Socratic questions, ready-made-tests list, a what-was-checked
+  checklist, and a mechanically-derived Result suggestion (RED if any AC is
+  NOT MET / a test failed / a breaking contract change exists / a
+  risk-score hard override fired; GREEN otherwise — `qa-report-synthesizer`
+  still makes the final call, this is a suggestion, not a decision).
+- `-For analyst`: real `git diff` text per changed/untracked file (not just
+  the line ranges `diff-set.json` carries) + the adapter-profile one-line
+  summary + the workspace dir path. Deliberately does NOT include AC text or
+  intake's citations — extracting ACs from a ticket's raw wiki markup is
+  `qa-intake`'s own judgment (CONTRACTS.md's `jira-ticket.json` section: "AC
+  extraction is qa-intake's judgment, deliberately NOT in this file"), so a
+  deterministic script cannot produce it; the orchestrator appends it from
+  intake's in-conversation brief before dispatch, per SKILL.md.
+Every artifact this script reads is optional — a `--quick` run, a denied
+mutation consent, or a skipped Phase 1b/1c lane all produce a missing file,
+rendered as an honest "not available"/"SKIPPED" line, never a silent
+omission or a fabricated value. Zero model calls, same "same input bytes →
+same output" determinism contract as `render-evidence.ps1`.
+
 **The "report" phase is appended AFTER `qa-report-synthesizer` returns, BEFORE
 `scripts/render-evidence.ps1` runs** — the one phase whose own duration would
 otherwise be unmeasurable, since it used to live only inside the evidence file
