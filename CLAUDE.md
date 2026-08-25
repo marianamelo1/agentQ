@@ -60,9 +60,14 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
    is the script's committed default). Verify everything with
    `scripts/check-mcp.ps1` (includes a live Jira probe) or `/mcp`. Jira is
    degradable to pasted AC text; Playwright/Figma are
-   frontend-branch-only; Testomatio is probed by the impact phase on every run and
-   reports `SKIPPED — Testomatio MCP not configured` when its token/server is
-   missing on a machine — never assume it works because it works elsewhere. No
+   frontend-branch-only; Testomatio is probed by the impact phase on every run with
+   a real query, not just connectivity — a token can authenticate (`system_ping`
+   succeeds) yet be read-only and 403 on `tests_list`/`tests_search`, which reads
+   nothing like "not configured" and must not be classified as it: reports
+   `SKIPPED — Testomatio MCP not configured` when its token/server is missing on a
+   machine, and distinctly `DEGRADED — Testomatio token is read-only` when the
+   query itself 403s — never assume it works because it works elsewhere, and never
+   let a live-but-403 connection read as "available". No
    other MCP is used — everything else is CLI (`git`,
    `dotnet`, `npx jest`/`nx`, `dotnet stryker`, `npx playwright test`, `oasdiff`,
    `scripts/jira.ps1`).
@@ -311,10 +316,15 @@ the diff set (routes, symbols, DTOs, migration tables/columns), scanned across
 latter — into `impact-index.json`. If `skipQaImpact` itself is `false`, the
 orchestrator also consults Testomat for cross-repo candidates: probe whether a
 Testomatio MCP is available in THIS session (pre-declared in `.mcp.json`, but its
-token is per-machine — never assume it works); available →
+token is per-machine — never assume it works from connectivity alone; the probe
+IS the real seed query below, not a separate ping) →
 search tests/suites by the seeds + the
-ticket's component → `testomat-candidates.json`; absent → the same file with
-`status: "SKIPPED — Testomatio MCP not configured"` (written whenever `skipQaImpact`
+ticket's component → `testomat-candidates.json`; no MCP configured → the same file
+with `status: "SKIPPED — Testomatio MCP not configured"`; MCP connects but the
+query itself 403s (a read-only token — `system_ping` can succeed while
+`tests_list`/`tests_search` still reject) → `status: "DEGRADED — Testomatio token
+is read-only"`, a distinct named state, never folded into the "not configured"
+skip (written whenever `skipQaImpact`
 is false). Overlaps
 Phases 2–3 (pure scan + MCP I/O, no build contention). Feeds qa-analyst (cross-repo
 fan-in) and the report's impact map + Impact matrix row. UI-automation and Testomat
@@ -329,8 +339,10 @@ sees this unless they deliberately turn it off. Needs Phase 1b's
 `impact-index.json` seeds (the script ran for this even if `skipQaImpact` skipped
 the Impact map display). Toggle `true` → `SKIPPED — disabled by config
 (skipManualTestAnalysis)`, always shown, never omitted. Otherwise: same Testomatio
-MCP probe as Phase 1b; absent → `manual-test-candidates.json` with `status:
-"SKIPPED — Testomatio MCP not configured"`. Available → two TQL queries, both
+MCP probe as Phase 1b — the real query classifies the lane, not a bare
+connectivity check; no MCP → `manual-test-candidates.json` with `status:
+"SKIPPED — Testomatio MCP not configured"`; read-only-token 403 → `status:
+"DEGRADED — Testomatio token is read-only"`. Otherwise → two TQL queries, both
 filtered to `state == 'manual'` (Testomat's own field distinguishing manual from
 automated test records — verified live against the real project): one OR-ing the
 (low-signal-filtered) seed values, one on `jira == '<ticketKey>'` when a ticket key
@@ -518,7 +530,14 @@ when consent was asked.
   warm build output across runs) then `run-tests.ps1 -GeneratedOnly -WorktreeRoot
   <worktreeBaseDir> -ResultsLabel base` — every generated test must FAIL (or
   not compile) there — evidence graded "verified against base" vs "static only". A
-  vacuously-green generated test is worse than none. Never flip the main worktree
+  base-side compile failure is not automatically "failed there": `run-tests.ps1`
+  now carries the real compiler diagnostic in the run entry's `failures[0].message`
+  (never the old opaque "dotnet build failed"), and only a failure that names a
+  symbol the diff actually adds counts as non-vacuity evidence, graded
+  `verified_non_compiling_on_base` — a compile failure unrelated to the diff is a
+  base-environment problem, not vacuity evidence, and must never be counted as a
+  pass on the anti-vacuity check. A vacuously-green generated test is worse than
+  none. Never flip the main worktree
   to base and back (each flip cost a full checkout + cold rebuild — the legacy
   `-FlipToBase`/`-FlipToBranch` modes exist for recovery only).
 - **Contract lane** (`scripts/contract-check.ps1`):
@@ -674,7 +693,15 @@ main report dropped, at full rigor:
   `GENERATED, COMPILES, NOT EXECUTED — <reason> — run: <command>` /
   `GENERATED, NOT EXECUTED — <reason>`.
 - AC claims carry their evidence source: `MET — verified by executed scenario X
-  (failed on base)` ≠ `MET — verified (vacuity: static only)` ≠ `APPEARS MET —
+  (failed on base)` ≠ `MET — verified (vacuity: static only)` ≠ `MET — verified
+  (vacuity: does not compile on base — references branch-new <symbol>)` — a base
+  build that fails because the generated test names a symbol the diff itself adds
+  is *stronger* non-vacuity evidence than a plain runtime failure (the test can't
+  even exist without the branch change), so it earns its own grade rather than
+  folding into "static only"; a base compile failure that does NOT trace to
+  anything the diff adds is not vacuity evidence at all — that's `UNVERIFIABLE —
+  base build fails for reasons unrelated to this diff` plus a separate
+  environment-risk note, never claimed as AC evidence either way — ≠ `APPEARS MET —
   static reading only` ≠ `NOT MET — <observed vs expected>` ≠ `UNVERIFIABLE —
   <reason>`.
 - Mutation reports **absolute survivors** ("a wrong X would ship"), never a

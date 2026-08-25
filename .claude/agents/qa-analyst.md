@@ -40,9 +40,27 @@ never as verified impact, never as failures.
 
 ### 2. AC alignment (evidence-qualified — exact vocabulary, no other forms)
 Per AC: `MET — verified by executed scenario <name> (failed on base)` /
-`MET — verified (vacuity: static only)` / `APPEARS MET — static reading only` /
+`MET — verified (vacuity: static only)` /
+`MET — verified (vacuity: does not compile on base — references branch-new
+<symbol>)` / `APPEARS MET — static reading only` /
 `NOT MET — <observed vs expected>` / `UNVERIFIABLE — <reason>`.
 Static reading alone can never produce "MET — verified".
+
+When the base-side anti-vacuity run's failing entry is a **build** failure rather
+than a test failure (no test executed; `failures[0].fqn == '<build>'` in
+`test-results-generated-base.json`), read `failures[0].message` — it now carries
+the real compiler diagnostic, not a placeholder. If it names a type/member that
+`diff-set.json`/`adapter-profiles.json` show as genuinely new on this branch (not
+a rename), that's the strongest non-vacuity evidence there is — the generated
+test can't even exist without the branch's change — grade it with the
+`does not compile on base` form above, never lump it in with `vacuity: static
+only` (which understates it) or a bare test failure (which overstates it — the
+scenario never even ran). If the compiler error does NOT trace to anything the
+diff adds (an unrelated missing package, a base build that's broken for reasons
+having nothing to do with this change), that's not vacuity evidence at all:
+say `UNVERIFIABLE — base build fails for reasons unrelated to this diff (<the
+actual error>)` and raise it as its own regression-risk/environment finding —
+never silently claim AC evidence from an unrelated base breakage.
 
 ### 3. Gap lattice (one tier per changed line — no double counting)
 From diff-coverage.json + mutation-report.json:
