@@ -24,11 +24,12 @@ The full workflow, safety rules, and phase-by-phase detail live in
 3. Open PowerShell, go to the project, and run `.\scripts\setup-mcp.ps1`.
    On macOS: `brew install --cask powershell` first, then
    `pwsh ./scripts/setup-mcp.ps1`.
-4. Go to Claude Code/CLi or Visual Studio with Claude Code.
-5. Run `claude` and approve the MCP prompt
-6. For E2E tests (frontend branches only), have your local dev stack already
+5. Go to Claude Code/CLi or Visual Studio with Claude Code.
+6. Run `claude` and approve the MCP prompt
+7. Go to your project repo, check out in the branch that you want to review
+8. For E2E tests (frontend branches only), have your local dev stack already
    running. Other levels don't need this.
-7. On Claude Code, Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
+9. Go back to AgenQ project, on Claude Code, Say: **"Review my branch {branch_name} in the {product} repo"** or use `/qa-review {branch_name} --{repo}` (see [Command-line style invocation](#command-line-style-invocation)),
    or just **"Test my branch EC-8876"** — the repo name is optional; agentQ finds it
    by checking which registered repo has a matching branch checked out.
 
