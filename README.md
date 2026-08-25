@@ -34,8 +34,9 @@ The full workflow, safety rules, and phase-by-phase detail live in
 
 ## Issue on setup
 
-Entered a wrong value? `.\scripts\setup-mcp.ps1 -Reset <VAR_NAME>`, then
-re-run without `-Reset` to set it again.
+Entered a wrong value? `.\scripts\setup-mcp.ps1 -Reset <VAR_NAME>` (macOS:
+`pwsh ./scripts/setup-mcp.ps1 -Reset <VAR_NAME>`), then re-run without
+`-Reset` to set it again.
 
  Check status any time with `.\scripts\check-mcp.ps1`
 (macOS: `pwsh ./scripts/check-mcp.ps1`) — tools, this project's MCP servers,
@@ -60,7 +61,7 @@ plain language:
 /qa-review EC-8876 - Add a new feature to payroll
 /qa-review --repo payroll-poc --branch feature/EC-8876
 /qa-review --worktree payroll-poc-EC-8876
-/qa-review --worktree <local-path>\payroll-poc-EC-8876
+/qa-review --worktree <local-path>/payroll-poc-EC-8876
 /qa-review --branch feature/EC-8876 --repo payroll-poc --ticket EC-8876
 ```
 
@@ -137,7 +138,8 @@ plus `--target`.
   judgment work (classification, analysis, test authoring, mutation design,
   design conformance, report synthesis). Twelve deterministic PowerShell scripts
   in `scripts/` do everything mechanical — so the same branch produces the same
-  verdict twice.
+  verdict twice. The scripts are cross-platform: Windows PowerShell 5.1+ or
+  pwsh 7+ on macOS/Linux (invoke as `pwsh scripts/<name>.ps1 …` there).
 - Everything lands in this repo: intermediate JSON under
   `workspace/<repo>/<branch>/`, the human-readable report under `reports/`.
 - **Product repos are read-only.** The single exception: generated tests you

@@ -14,6 +14,10 @@ never builds, boots, or runs tests.
 Artifact shapes: `scripts/CONTRACTS.md` → `impact-index.json`,
 `testomat-candidates.json`.
 
+All `scripts/*.ps1` are cross-platform PowerShell. In a PowerShell session invoke
+them directly; from a bash/zsh shell (macOS/Linux) prefix with `pwsh`, e.g.
+`pwsh scripts/impact-index.ps1 -Manifest …`.
+
 ## Inputs
 Same four optional slots as `/qa-review` (`--branch` / `--repo` / `--worktree` /
 `--ticket`, resolved identically — see that skill's Inputs), plus one of its own:

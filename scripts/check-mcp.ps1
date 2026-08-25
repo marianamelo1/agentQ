@@ -29,6 +29,9 @@ $ProfileFile = if ($IsWin) { $null }
     elseif ($env:SHELL -match 'bash') { Join-Path $HOME '.bashrc' }
     else                              { Join-Path $HOME '.profile' }
 
+# Platform-correct invocation shown in hint messages.
+$SetupCmd = if ($IsWin) { '.\scripts\setup-mcp.ps1' } else { 'pwsh ./scripts/setup-mcp.ps1' }
+
 function Test-PersistedEnvVar {
     # Persisted somewhere a NEW session would see it (User scope / profile line),
     # regardless of whether this process has it.
@@ -59,7 +62,7 @@ foreach ($t in $tools) {
     if (Get-Command $t.Command -ErrorAction SilentlyContinue) {
         Write-Host ("[ok] {0}" -f $t.Command) -ForegroundColor Green
     } else {
-        $suffix = if ($t.Optional) { ' (optional - consented Testcontainers paths only)' } else { ' - run .\scripts\setup-mcp.ps1' }
+        $suffix = if ($t.Optional) { ' (optional - consented Testcontainers paths only)' } else { " - run $SetupCmd" }
         Write-Host ("[missing] {0}{1}" -f $t.Command, $suffix) -ForegroundColor $(if ($t.Optional) { 'Yellow' } else { 'Red' })
     }
 }
@@ -175,14 +178,14 @@ foreach ($v in $vars) {
         Write-Host "[set] $($v.Name)$($v.Suffix) - but not in this session; restart Claude Code / this terminal" -ForegroundColor Yellow
     } else {
         $color = if ($v.Optional) { 'Yellow' } else { 'Red' }
-        Write-Host "[missing] $($v.Name)$($v.Suffix) - run .\scripts\setup-mcp.ps1" -ForegroundColor $color
+        Write-Host "[missing] $($v.Name)$($v.Suffix) - run $SetupCmd" -ForegroundColor $color
     }
 }
 if ([Environment]::GetEnvironmentVariable('JIRA_INTEGRATION_HUB_URL', 'Process') -or (Test-PersistedEnvVar -Name 'JIRA_INTEGRATION_HUB_URL')) {
     Write-Host "[set] JIRA_INTEGRATION_HUB_URL (optional override - jira.ps1 defaults to the generic prod gateway)" -ForegroundColor Green
 }
 if ([Environment]::GetEnvironmentVariable('MCP_VISMA_JIRA_PATH', 'Process') -or (Test-PersistedEnvVar -Name 'MCP_VISMA_JIRA_PATH')) {
-    Write-Host "[obsolete] MCP_VISMA_JIRA_PATH - the Jira MCP is retired; clear with: .\scripts\setup-mcp.ps1 -Reset MCP_VISMA_JIRA_PATH" -ForegroundColor Yellow
+    Write-Host "[obsolete] MCP_VISMA_JIRA_PATH - the Jira MCP is retired; clear with: $SetupCmd -Reset MCP_VISMA_JIRA_PATH" -ForegroundColor Yellow
 }
 
 # --- live Jira probe (REST lane, not an MCP) -----------------------------------------

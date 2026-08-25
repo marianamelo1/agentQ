@@ -5,6 +5,10 @@ Every script reads/writes JSON under `workspace/<repoSlug>/<branchSlug>/` (creat
 `<branchSlug>` is the branch name with unsafe chars →`-`. All JSON is UTF-8, no BOM.
 Scripts NEVER print secrets and NEVER write outside `workspace/`, `reports/`, `tools/`,
 or the run's worktree. Agents consume these files; they never re-parse raw TRX/XML.
+Absolute paths in artifacts are **platform-native** (`C:\…` with `\` on Windows,
+`/Users/…` with `/` on macOS/Linux — the Windows-shaped examples below are just
+examples); consumers must accept both separators, and repo-relative paths always
+use `/`.
 
 ## repo-detect output  (worktree.ps1 -DetectRepo, stdout only — no file, no manifest yet)
 Runs before any workspaceDir exists, so there is nowhere to write a file; its one
