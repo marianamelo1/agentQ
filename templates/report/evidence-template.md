@@ -98,8 +98,10 @@ the plain-language summary live there.
      under tests related to this branch (branch coverage Y%)". If
      diff-coverage.json has refused:true — state the refusal reason, no number.
      Test lists: three named lists ONLY — "most likely to catch a regression
-     here" / "flaky-risk smells (static)" / "observed flaky (flipped across
-     runs)". Never the word "riskiest".
+     here" / "flaky-risk smells (static)" / "might be flaky (failed this run —
+     rerun command provided; confirm outside agentQ)". Each might-be-flaky entry
+     quotes its rerunCommand from test-results.json VERBATIM so the developer
+     can copy-paste it. Never the word "riskiest".
      If any scenarios/*.json this run is level:"unit", end this section with:
      "🧪 Generated: `{{id}}` — {{title}}. See 'Generated scenarios' below."
      (one line per unit-level scenario). Omit the line entirely if none. -->
@@ -110,7 +112,11 @@ the plain-language summary live there.
 
 <!-- From mutation-report.json. Absolute survivors only, phrased as
      consequence: "a wrong {{X}} would ship — N tests covering {{file}} still
-     pass when {{mutation}}". Suppress NoCoverage mutants (they are coverage
+     pass when {{mutation}}". When stryker/summary.json carries a
+     testCaseFilter, scope every survivor claim honestly: "no test RELATED TO
+     THIS CHANGE kills it" — never "no test in the project". A fromCache:true
+     run states its verdicts were reused from an identical prior run, not
+     re-executed. Suppress NoCoverage mutants (they are coverage
      findings and belong in the Unit section). Name the assert to strengthen
      when known. If a surviving agentq-N mutant carries a suggestedFix, end
      that finding with: "🧪 Generated fix: strengthens `{{testFile}}`. See

@@ -28,6 +28,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Cross-platform (Windows + macOS/Linux): $IsWindows doesn't exist on Windows
+# PowerShell 5.1, and StrictMode turns a bare reference into a terminating error.
+$script:IsWin = $true
+$__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -106,6 +112,29 @@ function Set-MutantResult {
     $Mutant | Add-Member -NotePropertyName testsCompleted  -NotePropertyValue $TestsCompleted -Force
     $Mutant | Add-Member -NotePropertyName durationSeconds -NotePropertyValue ([math]::Round($DurationSeconds, 1)) -Force
     $Mutant | Add-Member -NotePropertyName statusReason    -NotePropertyValue $Reason -Force
+}
+
+function Test-BootsWebFactory {
+    # TRUE when the test project can boot a WebApplicationFactory (references
+    # Microsoft.AspNetCore.Mvc.Testing directly or via one ProjectReference
+    # level  -  same probe as run-tests.ps1, independent copy per this codebase's
+    # self-contained-scripts convention). Factory-booting projects never share
+    # the machine: the factory's 5s host-build timeout is load-sensitive.
+    # Unreadable csproj -> $true (the safe, sequential side).
+    param([Parameter(Mandatory = $true)][string]$ProjAbs)
+    try {
+        if (Select-String -LiteralPath $ProjAbs -Pattern 'Microsoft\.AspNetCore\.Mvc\.Testing' -Quiet) { return $true }
+        $projDir = Split-Path -Parent $ProjAbs
+        $raw = [System.IO.File]::ReadAllText($ProjAbs)
+        foreach ($mm in [regex]::Matches($raw, '<ProjectReference\s+Include="([^"]+)"')) {
+            # DirectorySeparatorChar (not a literal '\'): identity on macOS/Linux, so the
+            # csproj's forward-slash Include path stays resolvable on every OS.
+            $refAbs = [System.IO.Path]::GetFullPath((Join-Path $projDir ($mm.Groups[1].Value -replace '/', [IO.Path]::DirectorySeparatorChar)))
+            if ((Test-Path -LiteralPath $refAbs -PathType Leaf) -and
+                (Select-String -LiteralPath $refAbs -Pattern 'Microsoft\.AspNetCore\.Mvc\.Testing' -Quiet)) { return $true }
+        }
+        return $false
+    } catch { return $true }
 }
 
 # vstest's wording when a --filter matches nothing (TreatNoTestsAsError makes
@@ -257,12 +286,18 @@ foreach ($m in $runnable) {
 }
 
 # ---------------------------------------------------------------------------
-# Step 3  -  one fresh test process per mutant id.
+# Step 3  -  one fresh test process per mutant id, bounded-parallel.
 # WHY fresh process per id: the injected switches are read in static
 # initializers / static readonly fields, which run once per process (verified)
 #  -  reusing a process would freeze the first mutant's state for all later ids.
+# WHY parallel is safe here: AGENTQ_MUTANT is a per-PROCESS environment variable
+# (set via a cmd wrapper, never $env: which is script-global), so concurrent
+# mutants cannot see each other's switch. Mutants whose test project can boot a
+# WebApplicationFactory still run strictly one-at-a-time (load-sensitive 5s
+# host-build timeout  -  same lane rule as run-tests.ps1).
 # ---------------------------------------------------------------------------
 
+$mutantSpecs = New-Object System.Collections.Generic.List[object]
 foreach ($m in $runnable) {
     $id     = [string](Get-Prop $m 'id')
     $proj   = Resolve-TestProjectPath (Get-Prop $m 'testProject')
@@ -291,40 +326,109 @@ foreach ($m in $runnable) {
     $trxName = "agentq-$safeId.trx"
     $trxPath = Join-Path $evidenceDir $trxName
     if (Test-Path -LiteralPath $trxPath) { Remove-Item -LiteralPath $trxPath -Force }
+    $logPath = Join-Path $evidenceDir "run-$safeId.log"
 
-    Write-Verbose "Mutant $id : $filter"
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        $env:AGENTQ_MUTANT = $id
-        $res = Invoke-Dotnet -WorkingDirectory $worktreeDir -ArgumentList @(
-            'test', $proj, '--no-build', '-c', 'Debug',
-            '--filter', $filter,
-            '--logger', "trx;LogFileName=$trxName",
-            '--results-directory', $evidenceDir,
-            '--', 'RunConfiguration.TreatNoTestsAsError=true'
-        )
+    # One shell wrapper per mutant: sets the switch for THAT process tree only and
+    # file-redirects all output (no PS stream pumping, no drain deadlock). Two
+    # platform-specific forms since the "set the env var for one command" syntax
+    # differs; the redirection tail (`> "log" 2>&1`) is POSIX-and-cmd-compatible.
+    if ($script:IsWin) {
+        # WHY `set VAR=val&& …` with no space: cmd would otherwise store a trailing
+        # space in the value and the switch comparison would never match.
+        $line = "set AGENTQ_MUTANT=$id&& dotnet test `"$proj`" --no-build -c Debug --filter `"$filter`" --logger `"trx;LogFileName=$trxName`" --results-directory `"$evidenceDir`" -- RunConfiguration.TreatNoTestsAsError=true 1>`"$logPath`" 2>&1"
+    } else {
+        # `VAR=val cmd` scopes the env var to just this one command under POSIX
+        # sh -- no export/semicolon needed.
+        $line = "AGENTQ_MUTANT=$id dotnet test `"$proj`" --no-build -c Debug --filter `"$filter`" --logger `"trx;LogFileName=$trxName`" --results-directory `"$evidenceDir`" -- RunConfiguration.TreatNoTestsAsError=true > `"$logPath`" 2>&1"
     }
-    finally {
-        # Always unset  -  a leaked value would activate this mutant in every
-        # later run and in the baseline of any re-run.
-        Remove-Item Env:\AGENTQ_MUTANT -ErrorAction SilentlyContinue
-    }
-    $sw.Stop()
-    Write-Utf8NoBom -Path (Join-Path $evidenceDir "run-$safeId.log") -Content $res.Output
-    $trx = Read-TrxSummary -TrxPath $trxPath
-    $secs = $sw.Elapsed.TotalSeconds
+    $null = $mutantSpecs.Add(@{
+        M = $m; Id = $id; Filter = $filter; TrxPath = $trxPath; LogPath = $logPath
+        CmdLine = $line
+        Boots = (Test-BootsWebFactory -ProjAbs $proj)
+        Proc = $null; Sw = $null; Seconds = 0.0
+    })
+}
 
-    if ($res.Output -match $ZeroMatchPattern) {
+function Start-MutantProcess {
+    param($Spec)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    if ($script:IsWin) {
+        $psi.FileName = 'cmd.exe'
+        # WHY /s: with many inner quotes, cmd's default quote-stripping heuristic is
+        # undefined-ish; /s deterministically strips exactly the first and last quote.
+        $psi.Arguments = '/d /s /c "' + $Spec.CmdLine + '"'
+    } else {
+        # macOS/Linux: pass the whole script as ONE untouched argv element via
+        # ArgumentList -- `sh -c "<script>"` needs no extra quoting/escaping this
+        # way, unlike the .Arguments string form, which re-parses and would fight
+        # with the command's own embedded double quotes.
+        $psi.FileName = '/bin/sh'
+        $null = $psi.ArgumentList.Add('-c')
+        $null = $psi.ArgumentList.Add($Spec.CmdLine)
+    }
+    $psi.WorkingDirectory = $worktreeDir
+    $psi.UseShellExecute = $false
+    $Spec.Proc = [System.Diagnostics.Process]::Start($psi)
+    $Spec.Sw = [System.Diagnostics.Stopwatch]::StartNew()
+}
+
+function Invoke-MutantBatch {
+    # Bounded scheduler: fill slots, poll, refill. No deadline valve  -  parity
+    # with the old sequential behavior (the orchestrator's own anti-hang applies).
+    param([AllowEmptyCollection()][object[]]$Specs, [int]$Throttle)
+    if (@($Specs).Count -eq 0) { return }
+    $pending = New-Object 'System.Collections.Generic.Queue[object]'
+    foreach ($s in @($Specs)) { $pending.Enqueue($s) }
+    $running = New-Object 'System.Collections.Generic.List[object]'
+    while ($pending.Count -gt 0 -or $running.Count -gt 0) {
+        while ($pending.Count -gt 0 -and $running.Count -lt $Throttle) {
+            $spec = $pending.Dequeue()
+            Write-Verbose "Mutant $($spec.Id) : $($spec.Filter)"
+            Start-MutantProcess -Spec $spec
+            $running.Add($spec)
+        }
+        Start-Sleep -Milliseconds 300
+        for ($i = $running.Count - 1; $i -ge 0; $i--) {
+            $spec = $running[$i]
+            if ($spec.Proc.HasExited) {
+                $spec.Sw.Stop()
+                $spec.Seconds = $spec.Sw.Elapsed.TotalSeconds
+                $spec.ExitCode = $spec.Proc.ExitCode
+                $running.RemoveAt($i)
+            }
+        }
+    }
+}
+
+$parallelMutants = @($mutantSpecs | Where-Object { -not $_.Boots })
+$serialMutants   = @($mutantSpecs | Where-Object { $_.Boots })
+Invoke-MutantBatch -Specs $parallelMutants -Throttle ([Math]::Min(3, [Math]::Max(1, $parallelMutants.Count)))
+Invoke-MutantBatch -Specs $serialMutants -Throttle 1
+
+# Verdicts  -  identical rules to the old sequential path; output text comes from
+# the per-mutant log file the cmd wrapper redirected into.
+foreach ($spec in $mutantSpecs) {
+    $m = $spec.M
+    $filter = $spec.Filter
+    $outText = ''
+    if (Test-Path -LiteralPath $spec.LogPath) {
+        try { $outText = [System.IO.File]::ReadAllText($spec.LogPath) } catch { $outText = '' }
+    }
+    $trx = Read-TrxSummary -TrxPath $spec.TrxPath
+    $secs = $spec.Seconds
+    $exit = [int]$spec.ExitCode
+
+    if ($outText -match $ZeroMatchPattern) {
         # WHY Ignored, never Survived: zero matched tests is zero evidence.
         Set-MutantResult -Mutant $m -Status 'Ignored' -KilledBy @() -TestsCompleted $trx.Executed `
             -DurationSeconds $secs -Reason "filter '$filter' matched zero tests"
     }
-    elseif ($res.ExitCode -eq 0 -and $trx.Executed -gt 0) {
+    elseif ($exit -eq 0 -and $trx.Executed -gt 0) {
         # Green with the rule broken = the tests would not catch this.
         Set-MutantResult -Mutant $m -Status 'Survived' -KilledBy @() -TestsCompleted $trx.Executed `
             -DurationSeconds $secs -Reason $null
     }
-    elseif ($res.ExitCode -eq 0) {
+    elseif ($exit -eq 0) {
         # Exit 0 with zero executed tests (runner quirk)  -  same zero-evidence rule.
         Set-MutantResult -Mutant $m -Status 'Ignored' -KilledBy @() -TestsCompleted 0 `
             -DurationSeconds $secs -Reason 'test run exited 0 but executed zero tests  -  no evidence either way'

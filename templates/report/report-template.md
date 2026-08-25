@@ -36,13 +36,22 @@
 
 **1. {{plain title}}**
 {{2–3 plain sentences on the consequence}}
+
 🛠️ **Do this:** {{the one action doable right now}}
 
 ## ✅ What's good
 
-<!-- Bullet points, ONE concise sentence each — only claims the artifacts
-     support. -->
+<!-- FIRST bullet is ALWAYS the acceptance-criteria note — one plain sentence
+     rolling up the evidence file's AC grades, never a bare "met" without its
+     basis: all met+verified → "✅ The ticket's acceptance criteria are met —
+     proven by tests that ran"; appears-met/static-only → "✅ The acceptance
+     criteria appear met — from reading the code only, no test proved it";
+     any NOT MET → "⚠️ N of M acceptance criteria are not met — see finding X";
+     unverifiable/no ticket → "⚠️ Couldn't check the acceptance criteria —
+     <plain why>". Then the other bullets, ONE concise sentence each — only
+     claims the artifacts support. -->
 
+- {{acceptance-criteria note — always present, evidence-qualified}}
 - {{e.g. "All NNN existing tests around this change pass."}}
 - {{…}}
 
@@ -93,4 +102,7 @@ They only touch your repo if you say yes and review the diff.
 
 Reply with the ones to keep, or "none".
 
-📄 *Full technical detail (files, line numbers, timings, risk formula): `{{report-name}}-evidence.md`*
+<!-- The evidence pointer is a clickable relative markdown link (both files
+     live in reports/, so the bare filename is the correct relative path) —
+     never just the name in backticks. -->
+📄 *Full technical detail (files, line numbers, timings, risk formula): [{{report-name}}-evidence.md]({{report-name}}-evidence.md)*

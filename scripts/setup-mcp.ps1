@@ -10,7 +10,14 @@ Does the whole setup in one run:
      Homebrew on macOS, the official installer for claude). Docker is optional
      (only the consented Testcontainers paths use it) - reported, never
      installed here.
-  2. persists the environment variables agentQ needs, opening the token pages
+  2. downloads and verifies the pinned lane tools so no review ever pauses to
+     install anything: oasdiff (contract lane, checksum-verified into tools/),
+     dotnet-stryker (mutation lane, machine-shared under tools/stryker),
+     dotnet-coverage (coverage lane, global dotnet tool), and Playwright
+     browsers for every registered repo that declares @playwright/test. The
+     version pins live in contract-check.ps1 / stryker-run.ps1 - this script
+     just invokes their -EnsureTool modes. Cross-platform (Windows + macOS).
+  3. persists the environment variables agentQ needs, opening the token pages
      in your browser so you only have to paste:
        JIRA_PERSONAL_ACCESS_TOKEN  required - used by scripts/jira.ps1 (a direct
                                    REST call to the Jira gateway; NOT an MCP);
@@ -18,10 +25,11 @@ Does the whole setup in one run:
                                    Personal Access Tokens
        TESTOMATIO_API_TOKEN        optional - the Testomatio MCP server in
                                    .mcp.json; app.testomat.io -> Account -> tokens
-  3. offers to connect the Figma claude.ai connector (browser login with your
+  4. offers to connect the Figma claude.ai connector (browser login with your
      Visma account) if it isn't already
-  4. ends with check-mcp.ps1: every MCP server's status, the env vars, and a
-     LIVE Jira connectivity probe - so you see immediately whether it all works.
+  5. ends with check-mcp.ps1: every MCP server's status, the lane tools, the
+     env vars, and a LIVE Jira connectivity probe - so you see immediately
+     whether it all works.
 
 The Jira MCP (mcp-visma-jira) is retired: agentQ calls the gateway directly via
 scripts/jira.ps1. No clone, no MCP_VISMA_JIRA_PATH - if that variable is still
@@ -196,10 +204,12 @@ if ($Reset) {
 }
 
 Write-Host "agentQ setup"
-Write-Host "Checks/installs the tools every script needs, saves the environment"
-Write-Host "variables (opening the token pages for you), and finishes with a status"
-Write-Host "check that includes a live Jira probe. Nothing is written to any file in"
-Write-Host "this repo."
+Write-Host "Checks/installs the tools every script needs, downloads the pinned lane"
+Write-Host "tools (oasdiff, dotnet-stryker, dotnet-coverage, Playwright browsers) so"
+Write-Host "no review ever pauses to install, saves the environment variables"
+Write-Host "(opening the token pages for you), and finishes with a status check that"
+Write-Host "includes a live Jira probe. Outside tools/, nothing is written to any"
+Write-Host "file in this repo."
 Write-Host ""
 
 # --- 1. prerequisites (install if missing) --------------------------------------
@@ -309,7 +319,124 @@ if (-not $prereqsOk) {
 }
 Write-Host ""
 
-# --- 2. environment variables -----------------------------------------------------
+# --- 2. lane tools (downloaded & verified NOW - no run ever pauses to install) -----
+# Version pins live in the owning runtime scripts (single source of truth);
+# their -EnsureTool modes are invoked here. Running this script IS the consent
+# for these network installs (CLAUDE.md precondition 5).
+
+Write-Host "Lane tools (pinned versions - installed now so the first review never"
+Write-Host "stops for a download):"
+
+# oasdiff - contract lane (pin + sha256 checksum enforced by contract-check.ps1).
+try {
+    & (Join-Path $PSScriptRoot 'contract-check.ps1') -EnsureTool | ForEach-Object { Write-Host "  $_" }
+    if ($LASTEXITCODE -ne 0) { throw "contract-check.ps1 -EnsureTool exited $LASTEXITCODE" }
+    Write-Host "[ok] oasdiff" -ForegroundColor Green
+} catch {
+    Write-Host "[failed] oasdiff - $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  Safety net: the contract lane still installs it on first use." -ForegroundColor Yellow
+}
+
+if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+    # dotnet-stryker - mutation lane (pin enforced by stryker-run.ps1; a repo's
+    # own committed tool-manifest pin still wins at run time).
+    try {
+        & (Join-Path $PSScriptRoot 'stryker-run.ps1') -EnsureTool | ForEach-Object { Write-Host "  $_" }
+        if ($LASTEXITCODE -ne 0) { throw "stryker-run.ps1 -EnsureTool exited $LASTEXITCODE" }
+        Write-Host "[ok] dotnet-stryker" -ForegroundColor Green
+    } catch {
+        Write-Host "[failed] dotnet-stryker - $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Safety net: the mutation lane still installs it on first use." -ForegroundColor Yellow
+    }
+
+    # dotnet-coverage - the coverage wrapper that needs zero csproj changes.
+    if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) {
+        Write-Host "[ok] dotnet-coverage" -ForegroundColor Green
+    } else {
+        try {
+            # `tool update --global` installs when absent, upgrades when present.
+            dotnet tool update --global dotnet-coverage
+            Update-ProcessPath
+            # Unix: ~/.dotnet/tools may not be on PATH in this session yet.
+            $globalToolsBin = Join-Path $HOME (Join-Path '.dotnet' 'tools')
+            if (-not (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) -and
+                (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $globalToolsBin)) {
+                $env:PATH += ([IO.Path]::PathSeparator + $globalToolsBin)
+            }
+            if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) {
+                Write-Host "[installed] dotnet-coverage" -ForegroundColor Green
+            } else {
+                Write-Host "[installed] dotnet-coverage - not visible in this session; open a NEW terminal and re-run check-mcp.ps1" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "[failed] dotnet-coverage - $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+} else {
+    Write-Host "[skipped] dotnet-stryker + dotnet-coverage - need the .NET SDK (see above), then re-run this script" -ForegroundColor Yellow
+}
+
+# Playwright browsers - E2E lane, for registered repos declaring @playwright/test.
+# The install runs INSIDE the repo so npx resolves the repo's own pinned
+# playwright (never a float-install); browsers land in one machine-level cache.
+function Get-ProductRepoPathsFromConfig {
+    # Minimal JSONC -> JSON, same pragmatic parser as worktree.ps1 (self-contained
+    # scripts by convention - no shared module).
+    param([Parameter(Mandatory)][string]$Path)
+    $stripped = foreach ($line in (Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        $inString = $false
+        $cut = -1
+        for ($i = 0; $i -lt ($line.Length - 1); $i++) {
+            $c = $line[$i]
+            if ($c -eq '"' -and ($i -eq 0 -or $line[$i - 1] -ne '\')) { $inString = -not $inString }
+            elseif ((-not $inString) -and $c -eq '/' -and $line[$i + 1] -eq '/') { $cut = $i; break }
+        }
+        if ($cut -ge 0) { $line.Substring(0, $cut) } else { $line }
+    }
+    $cfg = ($stripped -join "`n") | ConvertFrom-Json
+    $paths = @()
+    if ($cfg.PSObject.Properties.Name -contains 'productRepos') {
+        foreach ($prop in $cfg.productRepos.PSObject.Properties) { $paths += [string]$prop.Value }
+    }
+    return $paths
+}
+
+$configPath = Join-Path (Split-Path $PSScriptRoot -Parent) (Join-Path '.claude' 'qa-agent-config.jsonc')
+if (-not (Test-Path $configPath)) {
+    Write-Host "[skipped] Playwright browsers - no .claude/qa-agent-config.jsonc yet; copy the example config, then re-run this script" -ForegroundColor Yellow
+} elseif (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
+    Write-Host "[skipped] Playwright browsers - npx not available (fix Node above)" -ForegroundColor Yellow
+} else {
+    $pwInstalled = $false
+    $pwDeclared = $false
+    foreach ($repoPath in (Get-ProductRepoPathsFromConfig -Path $configPath)) {
+        if ([string]::IsNullOrWhiteSpace($repoPath) -or -not (Test-Path -LiteralPath $repoPath)) { continue }
+        $pkgJson = Join-Path $repoPath 'package.json'
+        if (-not (Test-Path -LiteralPath $pkgJson)) { continue }
+        if (-not (Select-String -Path $pkgJson -Pattern '@playwright/test' -Quiet)) { continue }
+        $pwDeclared = $true
+        $localPw = Join-Path $repoPath (Join-Path 'node_modules' (Join-Path '@playwright' 'test'))
+        if (-not (Test-Path -LiteralPath $localPw)) {
+            Write-Host "[skipped] Playwright browsers for $repoPath - run npm install there first, then re-run this script" -ForegroundColor Yellow
+            continue
+        }
+        Write-Host "  Installing Playwright browsers (repo: $repoPath - one machine-level cache, safe to re-run)..."
+        Push-Location $repoPath
+        try {
+            npx playwright install
+            if ($LASTEXITCODE -eq 0) { $pwInstalled = $true }
+            else { Write-Host "[failed] playwright install exited $LASTEXITCODE (repo: $repoPath)" -ForegroundColor Red }
+        } finally { Pop-Location }
+    }
+    if ($pwInstalled) {
+        Write-Host "[ok] Playwright browsers" -ForegroundColor Green
+    } elseif (-not $pwDeclared) {
+        Write-Host "[skipped] Playwright browsers - no registered repo declares @playwright/test (E2E lane is frontend-only)" -ForegroundColor Yellow
+    }
+}
+Write-Host ""
+
+# --- 3. environment variables -----------------------------------------------------
 
 if (Get-PersistedEnvVar -Name 'MCP_VISMA_JIRA_PATH') {
     Write-Host "[obsolete] MCP_VISMA_JIRA_PATH is set but no longer used - the Jira MCP is" -ForegroundColor Yellow
@@ -355,7 +482,7 @@ if (Get-PersistedEnvVar -Name 'TESTOMATIO_API_TOKEN') {
     }
 }
 
-# --- 3. Figma claude.ai connector ---------------------------------------------------
+# --- 4. Figma claude.ai connector ---------------------------------------------------
 
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
 if (-not $claude -and (Test-Path $claudeExeFallback)) { $claude = $claudeExeFallback }
@@ -380,7 +507,7 @@ if ($claude) {
     Write-Host "[skipped] Figma connector check - claude CLI not available (see prerequisites above)." -ForegroundColor Yellow
 }
 
-# --- 4. status check: all MCPs + live Jira probe -------------------------------------
+# --- 5. status check: all MCPs + lane tools + live Jira probe ------------------------
 
 Write-Host ""
 Write-Host "Checking MCP servers and Jira..."

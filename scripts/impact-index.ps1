@@ -101,7 +101,7 @@ function Get-ProductAndTestRepos {
 function Get-DroppedReason {
     # Generic/low-signal identifiers: a match on these is noise, not impact evidence.
     # CONTRACTS.md's own example ("a match on Name is noise, not impact") is exactly this.
-    param([string]$Value)
+    param([string]$Value, [string]$Kind = 'symbol')
     $bare = $Value -replace '^[\w.]*\.', ''  # "Table.Column" -> "Column" for the genericity check
     if ($bare.Length -le 3) { return 'too short to match on reliably' }
     $generic = @(
@@ -110,6 +110,14 @@ function Get-DroppedReason {
         'Index', 'Key', 'Code', 'Text', 'Date', 'Number', 'Count', 'Total', 'Params'
     )
     if ($generic -contains $bare) { return 'low-signal — too generic to match on' }
+    # All-lowercase symbol/dto "identifiers" are almost always English words the
+    # extraction regexes caught in comments or prose ("a class with…" yielded
+    # seeds `with` and `explicitly` on a real run — 51k matches of pure noise).
+    # Real C#/TS type and export names carry at least one uppercase letter;
+    # endpoint/table seeds have their own shapes and are exempt.
+    if (($Kind -eq 'symbol' -or $Kind -eq 'dto') -and $bare -cmatch '^[a-z]+$') {
+        return 'low-signal — all-lowercase common word, not an identifier'
+    }
     return $null
 }
 
@@ -130,7 +138,11 @@ function Get-SeedsFromFile {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hunks
     )
     $seeds = New-Object System.Collections.Generic.List[object]
-    $full = Join-Path $RepoPath $RelPath
+    # WHY DirectorySeparatorChar, not a literal '\': $RelPath comes from git (always
+    # '/') -- on Windows this yields native backslash paths as before; on macOS/Linux
+    # it's an identity transform, so the already-native '/' paths pass through intact
+    # instead of becoming literal backslash characters Test-Path can't resolve.
+    $full = Join-Path $RepoPath ($RelPath -replace '/', [IO.Path]::DirectorySeparatorChar)
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return $seeds }  # deleted file
 
     # --- Ocelot route config: the file itself IS the API surface (CLAUDE.md) -- every
@@ -163,6 +175,12 @@ function Get-SeedsFromFile {
         for ($ln = $from; $ln -le $to; $ln++) {
             $text = $lines[$ln - 1]
 
+            # Comment lines feed the symbol regexes below with English prose
+            # ("a class with…" produced seed `with` on a real run — 51k noise
+            # matches); endpoints/attributes never live in comments either.
+            $trimmed = $text.TrimStart()
+            if ($trimmed.StartsWith('//') -or $trimmed.StartsWith('*') -or $trimmed.StartsWith('/*')) { continue }
+
             # Endpoints -- C# attribute routing
             if ($text -match '\[Http(Get|Post|Put|Delete|Patch)\(\s*"([^"]+)"\s*\)\]') {
                 $seeds.Add([ordered]@{ kind = 'endpoint'; value = "$($Matches[1].ToUpperInvariant()) $($Matches[2])"; from = "$RelPath`:$ln" })
@@ -179,8 +197,10 @@ function Get-SeedsFromFile {
                 $seeds.Add([ordered]@{ kind = 'endpoint'; value = "$($Matches[1].ToUpperInvariant()) $($Matches[2])"; from = "$RelPath`:$ln" })
             }
 
-            # Symbols -- a type or top-level function/const declaration touched by this diff
-            if ($text -match '(?:^|[\s;{}])(?:public|private|internal|protected)?\s*(?:static\s+)?(?:partial\s+)?(?:class|interface|record|struct|enum)\s+(\w+)') {
+            # Symbols -- a type or top-level function/const declaration touched by this diff.
+            # WHY ([A-Z]\w+): C# type names are PascalCase; a lowercase capture here is
+            # prose that slipped past the comment filter (e.g. inside a string literal).
+            if ($text -match '(?:^|[\s;{}])(?:public|private|internal|protected)?\s*(?:static\s+)?(?:partial\s+)?(?:class|interface|record|struct|enum)\s+([A-Z]\w+)') {
                 $seeds.Add([ordered]@{ kind = 'symbol'; value = $Matches[1]; from = "$RelPath`:$ln" })
             }
             if ($text -match '^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class)\s+(\w+)') {
@@ -300,6 +320,11 @@ function Invoke-RepoScan {
                     $seenOnLine[$mv] = $true
                     $sd = $seedByLowerValue[$mv]
                     if ($null -eq $sd) { continue }
+                    # WHY the 240-char cap: minified/generated lines (bundles, NSwag
+                    # output) can be tens of KB each and bloated one real artifact to
+                    # 24MB — context is a human hint, not the evidence itself.
+                    $ctx = $lh.Line.Trim()
+                    if ($ctx.Length -gt 240) { $ctx = $ctx.Substring(0, 240) + '…' }
                     $MatchList.Add([ordered]@{
                         repoSlug  = $Slug
                         indexOnly = $IndexOnly
@@ -307,7 +332,7 @@ function Invoke-RepoScan {
                         line      = $lh.LineNumber
                         seed      = [string]$sd.value
                         matchKind = (Get-MatchKindForSeedKind ([string]$sd.kind))
-                        context   = $lh.Line.Trim()
+                        context   = $ctx
                     })
                 }
             }
@@ -369,7 +394,7 @@ try {
         $k = "$($s.kind)::$($s.value)".ToLowerInvariant()
         if ($seenSeeds.ContainsKey($k)) { continue }
         $seenSeeds[$k] = $true
-        $reason = Get-DroppedReason -Value ([string]$s.value)
+        $reason = Get-DroppedReason -Value ([string]$s.value) -Kind ([string]$s.kind)
         if ($null -ne $reason) {
             $droppedSeeds.Add([ordered]@{ value = $s.value; reason = $reason })
             continue
@@ -377,17 +402,52 @@ try {
         $finalSeeds.Add($s)
     }
 
-    $matches  = New-Object System.Collections.Generic.List[object]
-    $scanned  = New-Object System.Collections.Generic.List[object]
-    $skipped  = New-Object System.Collections.Generic.List[object]
+    # WHY 'matchList', not 'matches': PowerShell variable names are case-insensitive,
+    # so $matches IS the automatic $Matches regex variable — any successful -match
+    # later in this scope (the reverseCoverage block has one) silently replaces the
+    # accumulated list with a regex-groups hashtable, corrupting the artifact.
+    $matchList = New-Object System.Collections.Generic.List[object]
+    $scanned   = New-Object System.Collections.Generic.List[object]
+    $skipped   = New-Object System.Collections.Generic.List[object]
 
     foreach ($slug in $repos.Product.Keys) {
         Invoke-RepoScan -Slug $slug -Path $repos.Product[$slug] -IndexOnly $false -Seeds $finalSeeds `
-            -MatchList $matches -ScannedList $scanned -SkippedList $skipped
+            -MatchList $matchList -ScannedList $scanned -SkippedList $skipped
     }
     foreach ($slug in $repos.TestRepos.Keys) {
         Invoke-RepoScan -Slug $slug -Path $repos.TestRepos[$slug] -IndexOnly $true -Seeds $finalSeeds `
-            -MatchList $matches -ScannedList $scanned -SkippedList $skipped
+            -MatchList $matchList -ScannedList $scanned -SkippedList $skipped
+    }
+
+    # Per-seed match cap: a seed with hundreds of references is telling you the
+    # identifier is ubiquitous, not that everything is affected — keeping every hit
+    # bloats the artifact (verified live: 51k matches, 24MB) without adding evidence.
+    # The first N per seed are kept (scan order is deterministic per machine);
+    # matchStats records exactly what was truncated so "covered everything" is
+    # never silently implied.
+    $MaxMatchesPerSeed = 200
+    $matchStats = New-Object System.Collections.Generic.List[object]
+    $perSeedCount = @{}
+    foreach ($m in $matchList) { $k = ([string]$m.seed).ToLowerInvariant(); if ($perSeedCount.ContainsKey($k)) { $perSeedCount[$k]++ } else { $perSeedCount[$k] = 1 } }
+    $needsCap = $false
+    foreach ($k in $perSeedCount.Keys) { if ($perSeedCount[$k] -gt $MaxMatchesPerSeed) { $needsCap = $true; break } }
+    if ($needsCap) {
+        $kept = New-Object System.Collections.Generic.List[object]
+        $perSeedKept = @{}
+        foreach ($m in $matchList) {
+            $k = ([string]$m.seed).ToLowerInvariant()
+            if (-not $perSeedKept.ContainsKey($k)) { $perSeedKept[$k] = 0 }
+            if ($perSeedKept[$k] -lt $MaxMatchesPerSeed) {
+                $kept.Add($m)
+                $perSeedKept[$k]++
+            }
+        }
+        foreach ($k in @($perSeedCount.Keys | Sort-Object)) {
+            if ($perSeedCount[$k] -gt $MaxMatchesPerSeed) {
+                $matchStats.Add([ordered]@{ seed = $k; total = $perSeedCount[$k]; kept = $MaxMatchesPerSeed })
+            }
+        }
+        $matchList = $kept
     }
 
     # reverseCoverage: filled from a PRIOR /qa-review run's risk-score.json topTests if one
@@ -412,7 +472,8 @@ try {
         mode            = $mode
         seeds           = $finalSeeds
         droppedSeeds    = $droppedSeeds
-        matches         = $matches
+        matches         = $matchList
+        matchStats      = $matchStats
         reverseCoverage = $reverseCoverage
         scanned         = $scanned
         skipped         = $skipped
@@ -422,7 +483,9 @@ try {
 
     $secondsTotal = 0.0
     foreach ($s in $scanned) { $secondsTotal += [double]$s.seconds }
-    Write-Output "impact-index: indexed $($scanned.Count) repo(s) in $([math]::Round($secondsTotal, 1))s - $($matches.Count) reference(s) to $($finalSeeds.Count) seed(s) ($($droppedSeeds.Count) dropped as low-signal) -> $outPath"
+    $capNote = ''
+    if ($matchStats.Count -gt 0) { $capNote = " - $($matchStats.Count) seed(s) truncated at $MaxMatchesPerSeed matches (see matchStats)" }
+    Write-Output "impact-index: indexed $($scanned.Count) repo(s) in $([math]::Round($secondsTotal, 1))s - $($matchList.Count) reference(s) to $($finalSeeds.Count) seed(s) ($($droppedSeeds.Count) dropped as low-signal)$capNote -> $outPath"
     exit 0
 }
 catch {

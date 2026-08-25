@@ -6,10 +6,14 @@
 .DESCRIPTION
     Modes:
       schema-diff  -- diff two OpenAPI documents with the pinned oasdiff binary.
-                     With -SpecPath: committed-spec shortcut (working tree vs
-                     `git show <baseSha>:<SpecPath>`). Otherwise -BaseSpec/-RevSpec
-                     point at boot-captured documents produced by the orchestrator
-                     or test fixtures -- this script never boots the app itself.
+                     Committed-spec path (the default): working tree vs
+                     `git show <baseSha>:<path>` per spec  -  the path(s) come from
+                     -SpecPath when given, otherwise auto-derived from the
+                     workspace's diff-set.json (changed/untracked openapi*/swagger*
+                     files; several specs are each diffed and merged; none changed
+                     -> honest skip). With -BaseSpec/-RevSpec: boot-captured
+                     documents produced by the orchestrator or test fixtures --
+                     this script never boots the app itself.
       ocelot-diff  -- ApiGateway: its API surface IS its Ocelot route config, so the
                      contract diff is a structural JSON diff of changed
                      *.ocelot.json files (base = git show, rev = working tree).
@@ -20,10 +24,11 @@
                      reachability read-only, and records the pact section of the
                      artifact from -PactResults if provided.
 
-    -EnsureTool downloads the pinned oasdiff release only (no diff run).
-    NOTE: the orchestrator asks the developer for consent BEFORE calling this
-    script with -EnsureTool -- it is a network install (CLAUDE.md precondition 5:
-    consented, never silent).
+    -EnsureTool downloads the pinned oasdiff release only (no diff run, no
+    manifest needed). The normal caller is scripts/setup-mcp.ps1 during developer
+    setup -- running setup IS the consent for the network install (CLAUDE.md
+    precondition 5). The on-demand call from schema-diff remains only as a safety
+    net for a machine that skipped setup.
 
     Exit code 0 = the script ran (findings live in the JSON artifact, and breaking
     changes are findings, not failures). Non-zero = the script itself failed.
@@ -31,7 +36,7 @@
 [CmdletBinding()]
 param(
     # Path to run-manifest.json (written by the orchestrator at Phase 0).
-    [Parameter(Mandatory = $true)]
+    # Required for every mode EXCEPT -EnsureTool (validated in Main).
     [string]$Manifest,
 
     [ValidateSet('schema-diff', 'ocelot-diff', 'pact-verify')]
@@ -70,22 +75,17 @@ $ProgressPreference = 'SilentlyContinue'
 $script:OasdiffVersion = '1.29.1'
 $script:RepoRoot       = Split-Path -Parent $PSScriptRoot
 $script:ToolsDir       = Join-Path $script:RepoRoot 'tools'
+# Cross-platform (Windows + macOS/Linux): $IsWindows/$IsMacOS don't exist on
+# Windows PowerShell 5.1, and StrictMode turns a bare reference into a
+# terminating error -- probe the automatic variables instead.
+$script:IsWin = $true
+$script:IsMac = $false
+$__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
+$__macVar = Get-Variable -Name IsMacOS -ErrorAction SilentlyContinue
+if ($null -ne $__macVar) { $script:IsMac = [bool]$__macVar.Value }
+$script:OasdiffExe     = Join-Path $script:ToolsDir $(if ($script:IsWin) { 'oasdiff.exe' } else { 'oasdiff' })
 $script:TempDir        = $null   # set after the manifest is read (lives under workspaceDir)
-
-# Per-OS/arch pinned binary. $IsWindows doesn't exist on Windows PowerShell 5.1
-# (which is Windows-only), hence the null check. The tools/ filename differs per
-# OS ('oasdiff.exe' vs 'oasdiff'), so machines sharing a checkout never clash.
-$script:IsWin = if ($null -ne $IsWindows) { $IsWindows } else { $true }
-$script:OasdiffBinName = if ($script:IsWin) { 'oasdiff.exe' } else { 'oasdiff' }
-$script:OasdiffExe     = Join-Path $script:ToolsDir $script:OasdiffBinName
-$script:OasdiffOs      = if ($script:IsWin) { 'windows' }
-    elseif ($null -ne (Get-Variable IsMacOS -ErrorAction SilentlyContinue) -and $IsMacOS) { 'darwin' }
-    else { 'linux' }
-$script:OasdiffArch    = if ($script:IsWin) {
-        if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
-    } else {
-        if ((& uname -m) -match 'arm64|aarch64') { 'arm64' } else { 'amd64' }
-    }
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -174,9 +174,9 @@ function Invoke-Native {
 
 function Install-Oasdiff {
     # Idempotent: returns 'already-present' or 'installed'.
-    # NOTE: this is a network install. The orchestrator obtains user consent
-    # BEFORE calling with -EnsureTool. The on-demand call from schema-diff is a
-    # safety net for direct/manual invocation with the tool missing.
+    # NOTE: this is a network install. The normal caller is setup-mcp.ps1 during
+    # developer setup (running setup is the consent). The on-demand call from
+    # schema-diff is a safety net for a machine that skipped setup.
     if (Test-Path -LiteralPath $script:OasdiffExe) {
         # Verify the pin, not just presence -- a stale binary from an older setup
         # would change rule ids/levels between machines.
@@ -196,7 +196,17 @@ function Install-Oasdiff {
     [System.Net.ServicePointManager]::SecurityProtocol = `
         [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
-    $asset     = "oasdiff_$($script:OasdiffVersion)_$($script:OasdiffOs)_$($script:OasdiffArch).tar.gz"
+    # Release asset per platform. Windows stays amd64 (x64 emulation covers ARM
+    # Windows); macOS/Linux pick the real architecture (Apple Silicon = arm64).
+    $osPart = if ($script:IsWin) { 'windows' } elseif ($script:IsMac) { 'darwin' } else { 'linux' }
+    $archPart = 'amd64'
+    if (-not $script:IsWin) {
+        try {
+            if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq `
+                [System.Runtime.InteropServices.Architecture]::Arm64) { $archPart = 'arm64' }
+        } catch { }
+    }
+    $asset     = "oasdiff_$($script:OasdiffVersion)_${osPart}_${archPart}.tar.gz"
     $baseUrl   = "https://github.com/oasdiff/oasdiff/releases/download/v$($script:OasdiffVersion)"
     $archive   = Join-Path $script:ToolsDir $asset
     $checksums = Join-Path $script:ToolsDir 'oasdiff-checksums.txt'
@@ -224,15 +234,18 @@ function Install-Oasdiff {
     }
 
     # Extract into a scratch dir and move only the exe, keeping tools/ tidy.
-    # tar ships with Windows 10+, macOS, and Linux, and handles .tar.gz natively.
+    # tar ships with Windows 10+ (tar.exe) and macOS/Linux natively.
     $extractDir = Join-Path $script:ToolsDir 'oasdiff-extract'
     if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force -Confirm:$false }
     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-    & tar -xzf $archive -C $extractDir
-    if ($LASTEXITCODE -ne 0) { throw "tar failed (exit $LASTEXITCODE) extracting $asset" }
+    $tarCmd = if ($script:IsWin) { 'tar.exe' } else { 'tar' }
+    & $tarCmd -xzf $archive -C $extractDir
+    if ($LASTEXITCODE -ne 0) { throw "$tarCmd failed (exit $LASTEXITCODE) extracting $asset" }
 
-    $exe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter $script:OasdiffBinName | Select-Object -First 1
-    if ($null -eq $exe) { throw "$($script:OasdiffBinName) not found inside $asset" }
+    $exeName = if ($script:IsWin) { 'oasdiff.exe' } else { 'oasdiff' }
+    $exe = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter $exeName |
+        Where-Object { -not $_.PSIsContainer } | Select-Object -First 1
+    if ($null -eq $exe) { throw "$exeName not found inside $asset" }
     Move-Item -LiteralPath $exe.FullName -Destination $script:OasdiffExe -Force
     if (-not $script:IsWin) {
         & chmod +x $script:OasdiffExe
@@ -371,20 +384,22 @@ function Get-OcelotRouteMap {
 # Main
 # ---------------------------------------------------------------------------
 try {
-    if (-not (Test-Path -LiteralPath $Manifest)) { throw "run manifest not found: $Manifest" }
-    $man          = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
-    $repoPath     = Get-Prop $man 'repoPath'
-    $baseSha      = Get-Prop $man 'baseSha'
-    $workspaceDir = Get-Prop $man 'workspaceDir'
-
     if ($EnsureTool) {
-        # Tool bootstrap only -- no diff, no artifact. Consent was collected by the
-        # orchestrator before this call (network install).
+        # Tool bootstrap only -- no diff, no artifact, no manifest. The normal
+        # caller is setup-mcp.ps1 (running setup is the consent for the network
+        # install); the schema-diff on-demand call is the safety net.
         $status = Install-Oasdiff
         Write-Output ("contract-check: oasdiff v{0} {1} at {2} (sha256 verified against release checksums.txt)" -f `
             $script:OasdiffVersion, $status, $script:OasdiffExe)
         exit 0
     }
+
+    if ([string]::IsNullOrWhiteSpace($Manifest)) { throw '-Manifest is required (all modes except -EnsureTool)' }
+    if (-not (Test-Path -LiteralPath $Manifest)) { throw "run manifest not found: $Manifest" }
+    $man          = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
+    $repoPath     = Get-Prop $man 'repoPath'
+    $baseSha      = Get-Prop $man 'baseSha'
+    $workspaceDir = Get-Prop $man 'workspaceDir'
 
     if (-not $workspaceDir) { throw "manifest is missing workspaceDir" }
     New-Item -ItemType Directory -Force -Path $workspaceDir | Out-Null
@@ -408,39 +423,9 @@ try {
         # user consent) long before this point.
         Install-Oasdiff | Out-Null
 
-        $diff = $null
-        if ($SpecPath) {
-            # Committed-spec shortcut. WHY: the working-tree file captures
-            # uncommitted spec edits on the rev side; `git show <baseSha>:<path>`
-            # is the exact merge-base contract on the base side; zero app boots.
-            if (-not $repoPath -or -not $baseSha) { throw "manifest is missing repoPath/baseSha (required for -SpecPath)" }
-            $specGit = $SpecPath -replace '\\', '/'
-            $revFile = Join-Path $repoPath $SpecPath
-            if (-not (Test-Path -LiteralPath $revFile)) {
-                $skipped    = $true
-                $skipReason = "working-tree spec missing at $revFile -- nothing to diff on the rev side"
-            } else {
-                # Keep the original extension: oasdiff uses it to pick the
-                # JSON/YAML loader.
-                $ext = [System.IO.Path]::GetExtension($SpecPath)
-                if ([string]::IsNullOrEmpty($ext)) { $ext = '.json' }
-                $baseFile = Join-Path $script:TempDir ("base-spec$ext")
-                $git = Invoke-Native -Exe 'git' -Arguments @('-C', $repoPath, 'show', "$($baseSha):$specGit") -StdOutFile $baseFile
-                if ($git.ExitCode -ne 0) {
-                    # A spec that did not exist at the merge base has no baseline
-                    # contract; skipping (not "0 breaking") keeps the claim honest.
-                    $skipped    = $true
-                    $skipReason = "spec $specGit does not exist at base SHA $baseSha -- no baseline contract to diff against"
-                } else {
-                    $prov.base  = 'committed-spec'
-                    $prov.rev   = 'committed-spec'
-                    $prov.route = $specGit   # repo-relative origin of the document
-                    $diff = Invoke-OasdiffDiff -BaseFile $baseFile -RevFile $revFile
-                }
-            }
-        } else {
+        if ($BaseSpec -or $RevSpec) {
             if (-not $BaseSpec -or -not $RevSpec) {
-                throw 'schema-diff requires either -SpecPath (committed-spec shortcut) or both -BaseSpec and -RevSpec (boot-captured docs)'
+                throw 'schema-diff with boot-captured docs requires BOTH -BaseSpec and -RevSpec'
             }
             if (-not (Test-Path -LiteralPath $BaseSpec)) { throw "base spec not found: $BaseSpec" }
             if (-not (Test-Path -LiteralPath $RevSpec))  { throw "rev spec not found: $RevSpec" }
@@ -451,15 +436,105 @@ try {
             # never a guess.
             $prov.route = $null
             $diff = Invoke-OasdiffDiff -BaseFile $BaseSpec -RevFile $RevSpec
-        }
-
-        if ($null -ne $diff) {
             $breaking   = $diff.breaking
             $warnings   = $diff.warnings
             $info       = $diff.info
             $skipped    = $diff.skipped
             $skipReason = $diff.skipReason
         }
+        else {
+            # Committed-spec shortcut. WHY: the working-tree file captures
+            # uncommitted spec edits on the rev side; `git show <baseSha>:<path>`
+            # is the exact merge-base contract on the base side; zero app boots.
+            # -SpecPath is optional: without it the changed spec file(s) are
+            # auto-derived from diff-set.json (files UNION untracked)  -  verified
+            # live: requiring the caller to hunt the path added a failed call +
+            # a manual grep to every run for information the diff already holds.
+            if (-not $repoPath -or -not $baseSha) { throw "manifest is missing repoPath/baseSha (required for the committed-spec path)" }
+            $specRx = '(?i)(^|/)(openapi|swagger)[^/]*\.(json|yaml|yml)$'
+            $specPaths = @()
+            if ($SpecPath) {
+                $specPaths = @($SpecPath)
+            }
+            else {
+                $diffSet = $null
+                $diffSetPath = Join-Path $workspaceDir 'diff-set.json'
+                if (Test-Path -LiteralPath $diffSetPath) {
+                    $diffSet = Get-Content -LiteralPath $diffSetPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                }
+                $found = @()
+                if ($null -ne $diffSet) {
+                    foreach ($f in @(Get-Prop $diffSet 'files' @())) {
+                        if ([string](Get-Prop $f 'status' '') -eq 'D') { continue }
+                        $p = ([string](Get-Prop $f 'path' '')) -replace '\\', '/'
+                        if ($p -match $specRx) { $found += $p }
+                    }
+                    foreach ($u in @(Get-Prop $diffSet 'untracked' @())) {
+                        $p = ([string]$u) -replace '\\', '/'
+                        if ($p -match $specRx) { $found += $p }
+                    }
+                }
+                # Sorted for byte-stable artifacts (same branch, same report, twice).
+                $specPaths = @($found | Sort-Object -Unique)
+            }
+
+            if ($specPaths.Count -eq 0) {
+                # An unchanged committed spec means an unchanged documented
+                # contract on this capture path  -  honest skip, never "0 breaking".
+                $skipped    = $true
+                $skipReason = 'no committed OpenAPI spec changed in this diff (auto-detected from diff-set.json) -- nothing to diff on the committed-spec path; pass -SpecPath or -BaseSpec/-RevSpec to override'
+            }
+            else {
+                $prov.base  = 'committed-spec'
+                $prov.rev   = 'committed-spec'
+                $prov.route = (@($specPaths | ForEach-Object { $_ -replace '\\', '/' }) -join '; ')
+                $specSkipNotes = @()
+                $ranAny = $false
+                $specIdx = 0
+                foreach ($sp in $specPaths) {
+                    $specIdx++
+                    $specGit = $sp -replace '\\', '/'
+                    $revFile = Join-Path $repoPath $sp
+                    if (-not (Test-Path -LiteralPath $revFile)) {
+                        $specSkipNotes += "working-tree spec missing at $revFile -- nothing to diff on the rev side"
+                        continue
+                    }
+                    # Keep the original extension: oasdiff uses it to pick the
+                    # JSON/YAML loader.
+                    $ext = [System.IO.Path]::GetExtension($sp)
+                    if ([string]::IsNullOrEmpty($ext)) { $ext = '.json' }
+                    $baseFile = Join-Path $script:TempDir ("base-spec-$specIdx$ext")
+                    $git = Invoke-Native -Exe 'git' -Arguments @('-C', $repoPath, 'show', "$($baseSha):$specGit") -StdOutFile $baseFile
+                    if ($git.ExitCode -ne 0) {
+                        # A spec that did not exist at the merge base has no baseline
+                        # contract; skipping (not "0 breaking") keeps the claim honest.
+                        $specSkipNotes += "spec $specGit does not exist at base SHA $baseSha -- no baseline contract to diff against"
+                        continue
+                    }
+                    $diff = Invoke-OasdiffDiff -BaseFile $baseFile -RevFile $revFile
+                    if ($diff.skipped) {
+                        $specSkipNotes += "$specGit`: $($diff.skipReason)"
+                        continue
+                    }
+                    $ranAny = $true
+                    $breaking += @($diff.breaking)
+                    $warnings += @($diff.warnings)
+                    $info     += @($diff.info)
+                }
+                if (-not $ranAny) {
+                    $skipped    = $true
+                    $skipReason = ($specSkipNotes -join ' | ')
+                }
+                else {
+                    # Some specs diffed, some couldn't: the artifact must carry both
+                    # truths  -  the diff results AND the per-spec skip reasons.
+                    foreach ($n in $specSkipNotes) {
+                        $info += , [ordered]@{ ruleId = 'spec-skipped'; level = 'INFO'; text = $n; path = $null }
+                    }
+                }
+            }
+        }
+
         $summary = "contract-check: schema-diff breaking=$($breaking.Count) warnings=$($warnings.Count) info=$($info.Count) skipped=$skipped -> $artifactPath"
         if ($skipped) { $summary = "contract-check: schema-diff SKIPPED ($skipReason) -> $artifactPath" }
     }
