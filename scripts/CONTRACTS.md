@@ -402,7 +402,9 @@ Killed|Survived|NoCoverage|Timeout|Ignored|CompileError. Consumers: suppress
 `NoCoverage` from mutation findings (they are coverage gaps), report absolute
 survivors only. A surviving `agentq-N` mutant may carry a `suggestedFix` (see
 `mutants.json` in `qa-mutation-author.md`) — a drafted, worktree-only edit that
-strengthens the covering test's assertion enough to kill it. This is the
+strengthens the covering test's assertion enough to kill it; its
+`plainOneLiner` field is the main report's 🧪 keep-list line for the
+fix, copied verbatim by `render-report.ps1`. This is the
 mutation level's equivalent of a generated scenario: a real "keep this?"
 candidate, not just a verbal recommendation. Mechanical (Stryker) survivors
 never carry one — qa-mutation-author only drafts fixes for mutants it designed
@@ -428,6 +430,7 @@ no Stryker execution this run). Two consumer rules bind:
 {
   "id": "EC-1234-AC3-1", "requirement": "AC-3", "level": "unit" | "component" | "api" | "e2e",
   "title": "Negative total is rejected",
+  "plainTitle": "Checks that an order with a negative total is refused instead of silently accepted",   // the main report's 🧪 keep-list line, copied verbatim by render-report.ps1 — plain words, no method names/paths/jargon
   "given": "…", "when": "…", "then": "…",
   "http": { "method": "POST", "path": "/api/invoices", "body": {}, "expectStatus": 422, "expectBody": {} },
   "targetProject": "<projectPath from adapter-profiles>",
@@ -463,10 +466,14 @@ number look better; an untouched `null` correctly reads as "not yet executed."
 ## analyst-brief.json  (qa-analyst — Phase 4 judgment output)
 Written by `qa-analyst` into the workspace dir alongside its (now short) chat
 summary. WHY a file, not just a chat message: everything downstream —
-`scripts/render-evidence.ps1` (deterministic) and `qa-report-synthesizer` (the
-2-page main report) — needs this content as data, not prose it would have to
-re-parse; writing it once here is also what let the analyst's own final chat
-message shrink to a one-line summary instead of re-stating every section.
+`scripts/render-evidence.ps1` and `scripts/render-report.ps1` (both
+deterministic — there is no report-writing agent) — needs this content
+as data, not prose it would have to re-parse; writing it once here is also
+what let the analyst's own final chat message shrink to a one-line summary
+instead of re-stating every section. The `plain`/`plainQuestion`/
+`mergeRiskPlain`/`whatsGoodBullets` fields ARE the developer-facing main
+report's prose — `render-report.ps1` copies them verbatim, no model rewrites
+them.
 Sections that are ALREADY fully mechanical from other artifacts are
 deliberately NOT duplicated here: contract phrasing renders straight from
 `contract-report.json` (ERR/WARN rules), the "most likely to catch a
@@ -484,7 +491,12 @@ Socratic questions, and manual-test-candidate framing.
       "severity": "High" | "Med" | "Low",
       "file": "src/payroll/VatCalculator.cs", "line": 47,
       "detail": "2-4 sentences: why it bites, in feature/consequence terms",
-      "impactNote": "optional — cite impact-index.json/testomat-candidates.json matches as candidates when they weight this finding's severity, never as verified impact"
+      "impactNote": "optional — cite impact-index.json/testomat-candidates.json matches as candidates when they weight this finding's severity, never as verified impact",
+      "plain": {
+        "title": "what would go wrong for a user/partner — everyday words, no paths/jargon",
+        "consequence": "2-3 plain sentences: what happens and why nothing catches it today",
+        "doThis": "the ONE action doable right now, plain words"
+      }
     }
   ],
   "acAlignment": [
@@ -496,8 +508,10 @@ Socratic questions, and manual-test-candidate framing.
   "flakyInterpretation": {
     "staticSmells": [ { "file": "…", "line": 12, "smell": "DateTime.Now" | "unseeded Random" | "Thread.Sleep" | "mutable static" | "Parallelizable+shared state", "note": "…" } ]
   },
-  "socraticQuestions": [ { "id": 1, "question": "…", "evidence": "file:line" } ],
+  "socraticQuestions": [ { "id": 1, "question": "…", "evidence": "file:line", "plainQuestion": "the same question with every code citation stripped — pure business/user wording" } ],
   "manualTesting": [ { "id": "de8c0276", "title": "…", "matchedBy": "diff-seed" | "ticket-link", "why": "the real scenario this candidate covers, in one sentence" } ],
+  "mergeRiskPlain": "ONE plain sentence explaining the merge-risk band; missing signals as 'we couldn't check X' caveats",
+  "whatsGoodBullets": ["2-4 plain one-sentence ✅ bullets the artifacts support — NOT the AC rollup (render-report.ps1 composes that mechanically)"],
   "summaryCounts": {
     "acMet": 7, "acTotal": 11, "acVerifiedByTest": 7, "acStaticOnly": 3, "acUnverifiable": 1,
     "existingTestsPassed": 40, "existingTestsTotal": 40,
@@ -518,19 +532,23 @@ coverage findings, not mutation findings — one tier per changed line).
 this run — same file, now with the analyst's one-sentence framing attached
 per candidate instead of a bare title.
 
-## report-selection.json  (qa-report-synthesizer — written to the WORKSPACE dir,
+## report-selection.json  (render-report.ps1 — written to the WORKSPACE dir,
 ## next to analyst-brief.json — NOT into reports/, which holds only the two
 ## human-facing .md files)
-Written alongside the JSON artifacts — the ONLY judgment `render-evidence.ps1`
-needs from the synthesizer, so the evidence file's "Finding detail" section
-uses the exact same ≤3 findings, in the exact same order and numbering, as the
-main report's "❌ N things to fix first" (never a second, independently-ranked
-list).
+This file is MECHANICAL: `scripts/render-report.ps1` writes it
+while rendering the main report — the top ≤3 `findings` and ≤3
+`socraticQuestions` in `analyst-brief.json`'s own array order (the analyst's
+priority order IS the selection), and the verdict from the mechanical rule
+(🔴 iff a failed test / a NOT MET AC / a breaking contract change / a
+risk-score hard override; else 🟢 — reproducible by construction). It exists
+so `render-evidence.ps1`'s "Finding detail" section uses the exact same
+findings, order, and numbering as the main report's "❌ N things to fix
+first" (never a second, independently-ranked list).
 ```json
 {
   "resultIcon": "🟢" | "🔴",
   "resultText": "Ready to open" | "Not ready yet",
-  "selectedFindingIds": [3, 1, 5],
+  "selectedFindingIds": [1, 2, 3],
   "questionIds": [1, 2, 4]
 }
 ```
@@ -539,6 +557,24 @@ list).
 Empty `selectedFindingIds` on a clean run is valid (main report shows
 "✅ Nothing blocking found"; the evidence file's Finding detail section
 renders "No findings rose to the main report this run.").
+
+## render-report.ps1  (Phase 8 — the MAIN report, deterministic, zero model calls)
+`scripts/render-report.ps1 -Manifest <path> -ReportPath <reports/….md>
+-BranchSummary "<🧭 one plain sentence>" [-Quick]` renders the main report
+(template: `templates/report/report-template.md`) straight from
+`analyst-brief.json`'s plain-language fields (copied VERBATIM), `risk-score.json`
+(band), `test-results.json`/`mutants.json`/`stryker/summary.json`/
+`diff-coverage.json`/`contract-report.json`/`impact-index.json`/
+`manual-test-candidates.json`/`diff-set.json`/`scenarios/*.json` (the 🔍 table
+and 🧪 keep-list), and writes `report-selection.json` (above). `-BranchSummary`
+is the one input no artifact carries (intake judgment held by the
+orchestrator). Missing optional artifacts render as honest "couldn't check"
+rows, never a pass; a missing `analyst-brief.json` is a hard error (no report
+without the analyst's judgment). Same idempotency contract as
+render-evidence.ps1: the Date derives from the report filename's own
+`-YYYY-MM-DD-HHmm` stamp, so identical inputs re-render byte-identical.
+Pre-Phase-F artifacts (no plain fields) fall back to the technical
+title/detail text — honest, never invented prose.
 
 ## contract-report.json  (contract-check.ps1)
 ```json
@@ -619,7 +655,7 @@ number.
 ## time-ledger.json  (orchestrator appends per phase)
 ```json
 {
-  "agentsCalled": ["qa-intake", "qa-analyst", "qa-scenario-writer", "qa-mutation-author", "qa-report-synthesizer"],
+  "agentsCalled": ["qa-intake", "qa-analyst", "qa-scenario-writer", "qa-mutation-author"],
   "phases": [
     { "name": "unit", "actor": "scripts/run-tests.ps1", "seconds": 42.3, "outcome": "RAN" | "DEGRADED — …" | "SKIPPED — …" },
     { "name": "scenario-authoring", "actor": "qa-scenario-writer", "seconds": 189.4, "outcome": "DEGRADED — agent stalled after dispatch (watchdog ceiling 4.5min + 45s grace), re-dispatched once, succeeded on retry", "stall": { "watchdogFired": true, "retried": true, "retrySucceeded": true, "runBudgetRemainingAtRetrySec": 312.0 } },
@@ -657,15 +693,12 @@ for an agent dispatch, mechanically, instead of the orchestrator hand-
 composing ~2 pages of curated content from 5+ artifacts every run (verified
 live 2026-08-25 to be one of the longest single orchestrator turns in a run).
 Two modes, selected by `-For`:
-- `-For report` (default): everything `qa-report-synthesizer` needs —
-  run identity, execution summary (unit/coverage/mutation/generated-tests/
-  contract/impact/manual-testing/risk-score, each an honest "not available
-  this run" line when its artifact is missing), findings, acceptance
-  criteria, Socratic questions, ready-made-tests list, a what-was-checked
-  checklist, and a mechanically-derived Result suggestion (RED if any AC is
-  NOT MET / a test failed / a breaking contract change exists / a
-  risk-score hard override fired; GREEN otherwise — `qa-report-synthesizer`
-  still makes the final call, this is a suggestion, not a decision).
+- `-For report` (default): superseded — the main report is now rendered by
+  `scripts/render-report.ps1`, so no dispatch consumes this mode. Kept as a
+  human/debugging summary view of a workspace (run identity,
+  execution summary, findings, ACs, questions, keep-list, checklist, Result
+  suggestion — each an honest "not available this run" line when its
+  artifact is missing).
 - `-For analyst`: real `git diff` text per changed/untracked file (not just
   the line ranges `diff-set.json` carries) + the adapter-profile one-line
   summary + the workspace dir path. Deliberately does NOT include AC text or
@@ -680,18 +713,15 @@ rendered as an honest "not available"/"SKIPPED" line, never a silent
 omission or a fabricated value. Zero model calls, same "same input bytes →
 same output" determinism contract as `render-evidence.ps1`.
 
-**The "report" phase is appended AFTER `qa-report-synthesizer` returns, BEFORE
-`scripts/render-evidence.ps1` runs** — the one phase whose own duration would
-otherwise be unmeasurable, since it used to live only inside the evidence file
-that same agent was writing. The orchestrator times the dispatch call, appends
-`{ "name": "report", "actor": "qa-report-synthesizer", "seconds": <measured>,
-"outcome": "RAN" }` and updates `totalSeconds`, THEN runs `render-evidence.ps1`
-— so the evidence file's phase table (which `render-evidence.ps1` reads this
-same file to build) includes its own report-writing cost instead of silently
-omitting the largest phase. `render-evidence.ps1` reads `agentsCalled`/
-`phases`/`totalSeconds` verbatim into ONE table (`Phase | Actor | Seconds |
-Outcome`) — there is no longer a separate hand-transcribed "Run summary" table
-duplicating the same phase/seconds columns with a different third column.
+**The "report" phase is appended AFTER `render-report.ps1` runs, BEFORE
+`scripts/render-evidence.ps1` runs** (the report writer is a script, ~1-2s,
+no agent). The orchestrator appends `{ "name": "report", "actor":
+"scripts/render-report.ps1", "seconds": <measured>, "outcome": "RAN" }` and
+updates `totalSeconds`, THEN runs `render-evidence.ps1` — so the evidence
+file's phase table includes the report-writing cost. `render-evidence.ps1`
+reads `agentsCalled`/`phases`/`totalSeconds` verbatim into ONE table
+(`Phase | Actor | Seconds | Outcome`) — there is no separate hand-transcribed
+"Run summary" table duplicating the same phase/seconds columns.
 
 ## impact-index.json  (impact-index.ps1 — Phase 1b of every /qa-review + the standalone /qa-impact)
 Static blast-radius index. Never builds, boots, or executes anything; read-only scan
@@ -767,9 +797,9 @@ not exist on runs where `skipQaImpact` (default `true`) skipped the phase.
   ]
 }
 ```
-Candidates are keyword matches — consumers (qa-analyst, qa-report-synthesizer) may
+Candidates are keyword matches — consumers (qa-analyst, the report renderers) may
 present them ONLY as *candidates (keyword match)*, never as affected or failed.
-qa-report-synthesizer copies `status` verbatim into the Impact matrix row. A missing
+`render-evidence.ps1` copies `status` verbatim into the Impact matrix row. A missing
 file on a run where the impact phase RAN (per the time-ledger) means the
 orchestrator skipped a step — treat as `DEGRADED — artifact missing`; on a
 config-skipped run the row reads `SKIPPED — disabled by config`. Either way, never

@@ -19,10 +19,16 @@
 
     -For analyst: diff hunks (real `git diff` text against baseSha, not just
     line ranges - diff-set.json only carries hunk line numbers) + the
-    adapter-profile one-line summary + the workspace dir path. Deliberately
-    does NOT include AC text or intake's citations - those are qa-intake's
-    OWN judgment, produced in conversation, not a JSON artifact this script
-    can read; the orchestrator appends them from intake's brief, per SKILL.md.
+    adapter-profile one-line summary + the impact/manual lane results
+    (impact-index.json, testomat-candidates.json, manual-test-candidates.json -
+    all written before Phase 4's dispatch, so inlining them removes 3 reads
+    from the agent's budget) + the workspace dir path. Deliberately does NOT
+    include test-results.json/diff-coverage.json/mutation-report.json (they
+    don't exist yet at dispatch time - the agent overlaps the test run and
+    reads them lazily) nor AC text or intake's citations - those are
+    qa-intake's OWN judgment, produced in conversation, not a JSON artifact
+    this script can read; the orchestrator appends them from intake's brief,
+    per SKILL.md.
 
     Every artifact is optional - a run under --quick, a denied mutation
     consent, or a skipped Phase 1b/1c lane all produce a missing file, which
@@ -188,6 +194,76 @@ if ($For -eq 'analyst') {
         if ($fromCache) { Add-Line "(adapter-profile cache HIT this run)" }
     }
     Add-Line ''
+
+    # Impact/manual lanes - written by Phase 1b/1c BEFORE this dispatch, so
+    # inlining them here removes 3 reads from the agent's budget. The lazy-read
+    # trio (test-results/diff-coverage/mutation-report) stays out on purpose:
+    # those don't exist yet at dispatch time (the agent overlaps the test run).
+    $impactIndex = Read-JsonOrNull (WsPath 'impact-index.json')
+    Add-Line "## Impact index (Phase 1b - inline, do not re-read impact-index.json)"
+    if ($null -eq $impactIndex) {
+        Add-Line "NOT AVAILABLE - impact-index.json not found (phase disabled by config, or intake incomplete)."
+    } else {
+        $seeds = @(Get-Prop $impactIndex 'seeds' @())
+        Add-Line "- Seeds: $(@($seeds | ForEach-Object { [string](Get-Prop $_ 'value' '') } | Where-Object { $_ -ne '' }) -join ', ')"
+        $scanned = @(Get-Prop $impactIndex 'scanned' @()) | ForEach-Object {
+            # entries are objects ({repoSlug, files, seconds}) in current runs; keep a
+            # plain-string fallback for any older artifact shape
+            if ($_ -is [string]) { $_ } else { [string](Get-Prop $_ 'repoSlug' '') }
+        } | Where-Object { $_ -ne '' }
+        if (@($scanned).Count -gt 0) { Add-Line "- Repos scanned: $($scanned -join ', ')" }
+        $allMatches = @(Get-Prop $impactIndex 'matches' @())
+        if (@($allMatches).Count -eq 0) {
+            Add-Line "- Matches: none - no reference to the changed code found in any scanned repo (no signal != not affected)."
+        } else {
+            foreach ($grp in ($allMatches | Group-Object { [string](Get-Prop $_ 'repoSlug' '') } | Sort-Object Name)) {
+                Add-Line "- $($grp.Name): $($grp.Count) match(es) (candidates - keyword evidence, never verified impact)"
+                $shown = @($grp.Group | Select-Object -First 5)
+                foreach ($m in $shown) {
+                    Add-Line "  - $([string](Get-Prop $m 'file' '')):$(Get-Prop $m 'line' '?') - $([string](Get-Prop $m 'context' '')) [seed: $([string](Get-Prop $m 'seed' ''))]"
+                }
+                if ($grp.Count -gt 5) { Add-Line "  - +$($grp.Count - 5) more in impact-index.json" }
+            }
+        }
+    }
+    Add-Line ''
+
+    $testomat = Read-JsonOrNull (WsPath 'testomat-candidates.json')
+    Add-Line "## Testomat candidates (inline, do not re-read testomat-candidates.json)"
+    if ($null -eq $testomat) {
+        Add-Line "NOT AVAILABLE - testomat-candidates.json not found (impact phase disabled by config)."
+    } else {
+        $tStatus = [string](Get-Prop $testomat 'status' '')
+        $tCands = @(Get-Prop $testomat 'candidates' @())
+        if ($tStatus -and $tStatus -ne 'RAN') { Add-Line "- Status: $tStatus" }
+        elseif (@($tCands).Count -eq 0) { Add-Line "- No candidates matched the seeds/ticket." }
+        else {
+            foreach ($c in @($tCands | Select-Object -First 5)) {
+                Add-Line "- $([string](Get-Prop $c 'title' '')) (matched by: $([string](Get-Prop $c 'matchedBy' '')))"
+            }
+            if (@($tCands).Count -gt 5) { Add-Line "- +$(@($tCands).Count - 5) more in testomat-candidates.json" }
+        }
+    }
+    Add-Line ''
+
+    $manualTests = Read-JsonOrNull (WsPath 'manual-test-candidates.json')
+    Add-Line "## Manual-test candidates (Phase 1c - inline, do not re-read manual-test-candidates.json)"
+    if ($null -eq $manualTests) {
+        Add-Line "NOT AVAILABLE - manual-test-candidates.json not found (phase disabled by config)."
+    } else {
+        $mStatus = [string](Get-Prop $manualTests 'status' '')
+        $mCands = @(Get-Prop $manualTests 'candidates' @())
+        if ($mStatus -and $mStatus -ne 'RAN') { Add-Line "- Status: $mStatus" }
+        elseif (@($mCands).Count -eq 0) { Add-Line "- No manual-test candidates matched the seeds/ticket." }
+        else {
+            foreach ($c in @($mCands | Select-Object -First 5)) {
+                Add-Line "- $([string](Get-Prop $c 'title' '')) (matched by: $([string](Get-Prop $c 'matchedBy' '')))"
+            }
+            if (@($mCands).Count -gt 5) { Add-Line "- +$(@($mCands).Count - 5) more in manual-test-candidates.json" }
+        }
+    }
+    Add-Line ''
+
     Add-Line "## Reminder for the orchestrator (not mechanical - add before dispatch)"
     Add-Line "- AC text verbatim (from qa-intake's own brief - not a JSON artifact)"
     Add-Line "- Intake's already-cited file:line evidence"

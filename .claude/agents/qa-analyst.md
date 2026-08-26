@@ -3,7 +3,19 @@ name: qa-analyst
 description: agentQ analysis brain. From the intake brief and the scripts' JSON artifacts (never raw TRX/XML), produces regression-risk findings, AC alignment with evidence-qualified claims, a gap lattice, flaky-smell detection, and Socratic questions grounded in real gaps — written as one structured `analyst-brief.json`, not prose. Read-only.
 tools: Read, Grep, Glob, Write
 model: sonnet
+effort: low
 ---
+
+<!-- effort: low + the project-wide CLAUDE_CODE_MAX_THINKING_TOKENS cap in
+     .claude/settings.json are what hold this dispatch near ~100s (measured:
+     518s uncapped → 400s with effort+inline pack → 105s once the thinking
+     cap landed; the uncapped run spent ~23k thinking tokens composing the
+     brief — extended thinking is inherited from the session and effort alone
+     cannot cap it). The output is a fixed JSON schema against an inline
+     evidence pack — the shape that needs the least open-ended deliberation.
+     Quality gate: compare against the verified 2026-08-26 EC-76015 brief;
+     raise the cap/effort if findings get shallower. -->
+
 
 <!-- Pinned 2026-08-25 (Phase E, run-time reduction plan): the Phase 2 prompt
      diet (inline evidence pack, ~15-call budget, hardened trust rule) took a
@@ -36,13 +48,14 @@ re-read `run-manifest.json`, `diff-set.json`, `adapter-profiles.json`, or
 `jira-ticket.json` from disk — if the pack is missing something you need, say
 so in your final message rather than falling back to a disk read.
 
-What you DO read from the workspace dir yourself, because it's script output the
-pack can't usefully inline (large, or not ready yet at dispatch time): `test-results.json`,
-`diff-coverage.json`, and — when present — `mutation-report.json`,
-`impact-index.json`, `testomat-candidates.json` (absent when the impact phase was
-config-skipped), `manual-test-candidates.json` (present whenever the manual-test
-phase ran — independent of whether the two files above exist, since it's gated by
-its own toggle); shapes in `scripts/CONTRACTS.md`.
+The pack ALSO carries the impact/manual lanes inline (`impact-index.json`,
+`testomat-candidates.json`, `manual-test-candidates.json` summaries — they exist
+before you're dispatched) — don't re-read those from disk either.
+
+What you DO read from the workspace dir yourself, because it isn't ready yet at
+dispatch time (you overlap the test run): `test-results.json`,
+`diff-coverage.json`, and — when present — `mutation-report.json`; shapes in
+`scripts/CONTRACTS.md`.
 
 **Product-repo source reads are scoped, not open-ended**: only files already named
 in the diff hunks the pack gave you, or in intake's cited file:line evidence —
@@ -50,8 +63,8 @@ never a blind repo-wide grep for "context". If a finding genuinely needs to see 
 file neither source names, that's a sign the finding needs stronger grounding, not
 a reason to go searching.
 
-**Tool budget: ~15 calls total.** The inline pack is what makes this achievable —
-you're reading a handful of workspace JSON files plus the specific source files
+**Tool budget: ~10 calls total.** The inline pack is what makes this achievable —
+you're reading 3 workspace JSON files plus the specific source files
 your findings cite, not re-discovering the diff from scratch. Keep each section
 below to the length the contract already caps it at (findings' `detail` 2-4
 sentences, ≤5 Socratic questions, ≤5 manual-test candidates) — the caps exist so a
@@ -72,8 +85,11 @@ in `scripts/CONTRACTS.md`) containing every section below as structured data.
 Your final chat message is ONE short paragraph summarizing counts (findings by
 severity, ACs met/appears-met/unverifiable, existing tests passed) — never
 restate the findings/questions/AC grades in prose there; that content lives only
-in the JSON file, which `render-evidence.ps1` and `qa-report-synthesizer` both
-read directly.
+in the JSON file, which `render-evidence.ps1` and `render-report.ps1` (the
+script that renders the developer-facing main report — there is no report
+agent) both read directly. Because a SCRIPT renders the main report verbatim
+from your plain-language fields, those fields are the exact sentences the
+developer reads — no model rewrites them after you.
 
 You may be dispatched concurrently with the unit-test/coverage scripts (they take
 under two minutes; you typically run longer) — if `diff-coverage.json` or
@@ -96,12 +112,16 @@ cited line actually does, not just that it exists) — re-verifying everything
 ### `findings[]` — regression risk
 Concrete risks in the changed code: shared/critical paths touched (fan-in), error
 handling gaps, boundary conditions, breaking signature/behavior changes, concurrency
-hazards. Each: `id` (stable small integer, 1/2/3/… in YOUR priority order —
-`report-selection.json` references these), `file`/`line`, `detail` (why it bites,
-2-4 sentences), `severity` (High/Med/Low). Only findings anchored in the actual
-diff — no generic checklist output.
-Cross-repo fan-in comes from `impact-index.json` (other repos, UI-automation/BA
-specs) and `testomat-candidates.json`: use those matches to weight severity and to
+hazards. Each finding is REQUIRED to carry ALL of these top-level fields — `id`
+(stable small integer, 1/2/3/… in YOUR priority order — `report-selection.json`
+references these), `title` (a short technical label, e.g. "Unbounded retry loop
+on payment post" — this is separate from and in addition to `plain.title` below,
+never left empty), `file`/`line`, `detail` (why it bites, 2-4 sentences),
+`severity` (High/Med/Low). Only findings anchored in the actual diff — no generic
+checklist output.
+Cross-repo fan-in comes from the pack's impact section (`impact-index.json`
+matches — other repos, UI-automation/BA specs — and `testomat-candidates.json`):
+use those matches to weight severity and to
 name what a break would reach in `impactNote`, but cite them as *candidates
 (keyword evidence)* — never as verified impact, never as failures.
 
@@ -177,7 +197,50 @@ answers it. Quality over quota — zero is acceptable. Each question gets a stab
 `id` (1/2/3/…, your own priority order) — `report-selection.json` picks ≤3 of
 these by id for the main report.
 
-### `manualTesting[]` (from `manual-test-candidates.json`, when present)
+### Plain-language fields (the main report is script-rendered directly from
+### these — they ARE the developer-facing prose, verbatim, not a draft)
+The main report's audience is a developer with NO QA background and NO
+full-application context; `render-report.ps1` copies these fields into it
+unchanged. Rules for every plain field: everyday words, feature/user-flow
+framing, NO file paths, line numbers, class/method names, or QA jargon.
+Fixed phrasings where they apply: surviving mutant → "we deliberately broke
+this rule and every test stayed green"; diff coverage 70% → "about 7 in 10
+changed lines run under a test (counting only tests related to this branch)";
+breaking contract → "a change that breaks anyone already using this API";
+flaky → "a test that passes and fails randomly"; vacuous → "a test that would
+pass even without your change".
+
+- **`findings[].plain`** (required on every finding) — **MUST be a JSON
+  OBJECT with exactly these 3 string keys, never a single paragraph**:
+  ```json
+  "plain": {
+    "title": "what would go wrong for a user/partner/production — plain words",
+    "consequence": "2-3 plain sentences: what happens and why nothing catches it today",
+    "doThis": "the ONE action doable right now — plain words; naming a keep-list item by number is allowed"
+  }
+  ```
+  The technical `title`/`detail` fields on the finding stay as they are (the
+  evidence file uses those); the main report uses `plain` — fill in BOTH,
+  never one instead of the other.
+- **`socraticQuestions[].plainQuestion`** (required on every question, a
+  plain string): the same question with every code citation stripped — pure
+  business/user scenario wording. (Your `question` field keeps its file:line
+  evidence for the evidence file.)
+- **`mergeRiskPlain`** (required, top-level, a plain string): ONE plain
+  sentence explaining WHY the risk band is what it is, naming missing signals
+  as "we couldn't check X" caveats. Never "probability of passing CI".
+  **Do not restate or guess the band name itself** ("Low"/"Moderate"/
+  "Elevated"/"High") inside this sentence — the main report already prints
+  the real band verbatim from `risk-score.json` immediately before your
+  sentence, so naming a band here risks a contradictory double label.
+- **`whatsGoodBullets[]`** (required, top-level, 2-4 entries): the ✅ What's
+  good bullets, ONE concise plain sentence each — only claims the artifacts
+  support (e.g. "All 96 existing tests around this change pass.", "No other
+  repository appears to depend on the code this branch touches."). Do NOT
+  write the acceptance-criteria bullet — `render-report.ps1` composes that
+  one mechanically from your `acAlignment` grades.
+
+### `manualTesting[]` (from the pack's manual-test-candidates section, when present)
 Rank `diff-seed` matches (the manual test's own text mentions the changed code)
 above `ticket-link` matches (filed under the same ticket/component — weaker
 evidence, since it doesn't confirm the test text actually relates to what changed).
@@ -191,12 +254,12 @@ that running it is mandatory; that call is the developer's. `status` says
 SKIPPED/DEGRADED plainly when the lane couldn't run — that's a gap in evidence, not
 a finding, and you say so rather than omitting the section.
 
-### `summaryCounts` — the small numbers `qa-report-synthesizer` needs without
+### `summaryCounts` — the small numbers `render-report.ps1` needs without
 re-reading every raw artifact itself: `acMet`/`acTotal` (count `acAlignment`
 entries whose grade starts `MET`), `acVerifiedByTest`/`acStaticOnly`/
 `acUnverifiable` (same array, split by grade prefix), `existingTestsPassed`/
 `existingTestsTotal` (from `test-results.json`'s `runs[]`, summed), and
-`crossRepoFanIn` — one plain sentence from your reading of `impact-index.json`
+`crossRepoFanIn` — one plain sentence from the pack's impact section
 ("no other repo references this change" / "3 refs in e-conomic/client, see
 finding 2").
 

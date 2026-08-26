@@ -32,8 +32,7 @@ the plain-language summary live there.
      ONE table carries both actor and outcome per phase — there is no separate
      "Time ledger" section below. The "report" phase's row exists because the
      orchestrator appends it (with the real measured seconds) AFTER
-     qa-report-synthesizer returns and BEFORE this file is rendered — the one
-     phase that used to be unmeasurable because it lived only in here. -->
+     scripts/render-report.ps1 runs and BEFORE this file is rendered. -->
 
 **Agents called:** {{agentsCalled joined by " · ", or "— none (all cached / skipped) —"}}
 

@@ -93,9 +93,14 @@ one. Add it to the matching mutant's entry in `mutants.json`:
 ```json
 "suggestedFix": {
   "testFile": "worktree-relative path", "rationale": "asserts the computed amount instead of just that the call succeeded",
+  "plainOneLiner": "Strengthens an existing test so a silently changed VAT rate can no longer ship unnoticed",
   "before": "…the exact lines being replaced…", "after": "…the strengthened replacement…"
 }
 ```
+`plainOneLiner` is the main report's 🧪 keep-list line for this fix, copied
+VERBATIM by `scripts/render-report.ps1` — plain everyday words for a developer
+with no QA background: what the strengthened test protects against in feature
+terms, never method names, paths, or the word "mutant".
 Mechanical (Stryker) survivors never get one from you — Stryker runs after your
 tier (Phase 5 ordering), so its survivors aren't known yet when you author; they
 stay a verbal recommendation in the verdict block, not a drafted fix.

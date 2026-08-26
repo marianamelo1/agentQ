@@ -54,6 +54,15 @@ function under `components/` that you call directly with no render is `unit`, no
 `component`. Include the Given/When/Then, concrete inputs incl. boundary values,
 and the requirement id.
 
+Each scenario also carries a **`plainTitle`**: ONE plain-everyday-words
+sentence for the main report's 🧪 keep-list, which `scripts/render-report.ps1`
+copies VERBATIM — no model rewrites it after you.
+Audience: a developer with no QA background. No method/class names, no paths,
+no QA jargon — describe what the test proves in user/feature terms (e.g.
+"Checks that a read served from the shared cache layer records the right
+monitoring tag", not "GetSimpleAsync L2 hit tags cache.payroll_item_types
+with result=L2Hit"). The technical `title` stays as-is for the evidence file.
+
 ## Step 2 — Render per adapter profile (the profile is LAW)
 - **Idiom**: xunit → `[Fact]`/`[Theory]`+`[InlineData]`, ctor/IDisposable, class
   fixtures, `[Trait("Category","agentQ-generated")]`. nunit3 → `[Test]`/`[TestCase]`,
