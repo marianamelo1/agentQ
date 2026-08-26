@@ -116,6 +116,9 @@ $script:IsWin = $true
 $__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
 if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
 
+# See pathext-guard.ps1: repairs a narrowed PATHEXT before any git/dotnet/pwsh resolution below.
+. (Join-Path $PSScriptRoot 'pathext-guard.ps1')
+
 # WHY: git/dotnet emit UTF-8; PS 5.1's OEM-codepage console decoding would mangle
 # non-ASCII test/file names before they round-trip into the JSON artifact.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }

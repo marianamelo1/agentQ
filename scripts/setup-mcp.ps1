@@ -72,6 +72,9 @@ $ErrorActionPreference = 'Stop'
 # $IsWindows doesn't exist on Windows PowerShell 5.1 (which is Windows-only).
 $IsWin = if ($null -ne $IsWindows) { $IsWindows } else { $true }
 
+# See pathext-guard.ps1: repairs a narrowed PATHEXT before any Get-Command probe below.
+. (Join-Path $PSScriptRoot 'pathext-guard.ps1')
+
 # Unix persistence target: the profile of the user's login shell.
 $ProfileFile = if ($IsWin) { $null }
     elseif ($env:SHELL -match 'zsh')  { Join-Path $HOME '.zshrc' }

@@ -37,6 +37,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+# See pathext-guard.ps1: repairs a narrowed PATHEXT before any git/pwsh resolution below.
+. (Join-Path $PSScriptRoot 'pathext-guard.ps1')
+
 $script:AgentQRoot    = Split-Path -Parent $PSScriptRoot
 $script:WorkspaceRoot = Join-Path $script:AgentQRoot 'workspace'
 $script:WorktreePs1   = Join-Path $PSScriptRoot 'worktree.ps1'

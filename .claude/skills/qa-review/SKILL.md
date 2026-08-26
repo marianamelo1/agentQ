@@ -76,6 +76,35 @@ never exceeds 10 minutes** (see CLAUDE.md Performance principles).
 (`date +%s` via Bash, or `Get-Date` via PowerShell) as the run's start. Every
 stall decision below checks `remaining = 600s - (now - runStart)`.
 
+**The timer-vs-dispatch race itself is verified live (2026-08-26)**: a
+background `sleep 5` batched alongside an `Agent` dispatch doing several
+sequential tool calls sent its own completion notification well before the
+agent's — confirming a background shell timer's notification really does
+arrive independently and can precede the paired dispatch's own completion.
+That part of the mechanism works. What is NOT proven by that test, and what a
+real incident the same day exposed: the mechanism is only as reliable as the
+orchestrator's own discipline in every single dispatch batch, forever, with no
+check on whether the paired timer call was actually issued. A qa-intake
+dispatch ran ~10 minutes — over 3x its 3-min ceiling — with none of this
+section's nudge/re-dispatch/degrade behavior visible, consistent with the
+paired timer having been narrated ("watchdog set at 3 min") but never actually
+issued that turn. **`scripts/watchdog-state.ps1` exists because of this**: it
+makes each dispatch's deadline a fact on disk (`watchdog-state.json`,
+CONTRACTS.md) instead of something that only exists if the orchestrator
+correctly remembered it in-context. Concretely, this changes the procedure
+below in two ways:
+- Step 1's paired-timer batch ALSO includes `scripts/watchdog-state.ps1 -Arm
+  -Manifest <path> -Label <agent-or-a-distinguishing-name> -Agent <agent>
+  -CeilingSeconds <ceiling>` — three tool calls in the batch, not two.
+- **On every re-invocation during a run, regardless of what triggered it**
+  (the paired timer firing, the agent's own completion, a background-shell-job
+  notification, anything), the FIRST action is `scripts/watchdog-state.ps1
+  -CheckOverdue -Manifest <path>` (cheap, read-only, <1s). Any entry it
+  returns is stalled BY DEFINITION — its deadline passed regardless of why
+  this turn woke up — and gets handled from step 3 below even if this
+  particular re-invocation's own trigger was something else entirely (a stray
+  or skipped paired-timer call no longer means nobody ever checks).
+
 **Per-dispatch ceiling** (1.5× the agent's target, floor 3 min — see each step
 below for which applies):
 | Agent | Target | Ceiling |
@@ -89,11 +118,18 @@ below for which applies):
 
 **Procedure for an agent dispatch** (every `Agent` tool call in this skill except
 `qa-e2e-author`):
+0. **Before anything else this re-invocation**: `scripts/watchdog-state.ps1
+   -CheckOverdue -Manifest <path>`. Any entry returned is stalled by
+   definition — go straight to step 3 for it, regardless of what actually
+   triggered this re-invocation (see the durable-state note above).
 1. Dispatch the agent AND start a paired background timer for its ceiling
    (`sleep <ceilingSeconds>` via Bash, or `Start-Sleep -Seconds <n>` via
    PowerShell — either is cross-platform; never a `cmd.exe`-only construct) with
-   `run_in_background: true`, in the **same tool-call batch** as the dispatch.
-   Whichever completes first re-invokes you.
+   `run_in_background: true`, AND `scripts/watchdog-state.ps1 -Arm -Manifest
+   <path> -Label <name> -Agent <agent> -CeilingSeconds <ceiling>` — all THREE
+   in the **same tool-call batch** as the dispatch. Whichever of the agent or
+   the timer completes first re-invokes you (step 0 above is what catches it
+   if neither notification does).
 2. **Agent's own completion notification arrives first** → sanity-check it
    before accepting it as done: does its result actually match what it was
    asked for (the expected workspace artifact exists / the response isn't a
@@ -102,12 +138,14 @@ below for which applies):
    untracked background work and returned an incomplete placeholder answer — a
    **false completion**, distinct from a silent stall, that a bare "wait for
    the notification" check does not catch. If the result looks genuinely done →
-   normal flow, the timer later firing is a no-op. If it looks incomplete →
-   treat it exactly like a stalled dispatch from step 3b onward (`SendMessage` a
+   `scripts/watchdog-state.ps1 -Clear -Manifest <path> -Label <name>`, normal
+   flow, the timer later firing is a no-op. If it looks incomplete → treat it
+   exactly like a stalled dispatch from step 3b onward (`SendMessage` a
    nudge to resume it — confirmed live: a nudged agent correctly picked back up
    and finished with the right answer once told to actually wait for its own
-   background work).
-3. **Timer fires first** → the agent is running long or has stalled:
+   background work) — do NOT clear the watchdog-state entry yet.
+3. **Timer fires first, OR step 0 found an overdue entry** → the agent is
+   running long or has stalled:
    a. Stream one status line immediately ("`<agent>` is past its expected time
       (ceiling `<n>`s) — checking on it"). Never go dark.
    b. `ListAgents` to confirm it's still listed, then `SendMessage` a short nudge
@@ -121,23 +159,34 @@ below for which applies):
       the run budget: if `remaining >= ceiling + 20s + 15s buffer`, re-dispatch a
       **fresh** `Agent` call (new instance, not a resume of the stalled one — same
       original inputs; all six agents are idempotent over their workspace inputs)
-      paired with its own new watchdog timer at the same ceiling. If the budget
-      does not allow it, or this is already a retry, stop: don't retry a third
-      time regardless of budget.
+      paired with its own new watchdog timer AND a fresh `watchdog-state.ps1
+      -Arm` call under the same `-Label` (replaces the overdue entry with a new
+      deadline). If the budget does not allow it, or this is already a retry,
+      stop: don't retry a third time regardless of budget.
    d. Any stall/retry gets an honest `time-ledger.json` row with the REAL elapsed
       seconds (never 0, never "not comparable" — see the corrected-ledger rule),
       labeled `DEGRADED — agent stalled, lane skipped (run-budget)` if given up,
-      or noting the retry if one happened and then succeeded. The report/evidence
-      file must reflect a given-up lane as degraded, never silently missing it.
+      or noting the retry if one happened and then succeeded — populate the
+      `stall` object's `dispatchedAt`/`ceilingSeconds` from the
+      `watchdog-state.json` entry (CONTRACTS.md), not from memory, and set
+      `caughtBy` to `"paired-timer"` when this dispatch's own timer fired, or
+      `"check-overdue"` when step 0 caught it during an unrelated
+      re-invocation instead. The report/evidence file must reflect a given-up lane as degraded, never
+      silently missing it. Either way (succeeded on retry, or given up),
+      `scripts/watchdog-state.ps1 -Clear -Manifest <path> -Label <name>` once
+      resolved — a resolved entry must stop being reported as overdue.
 
 **Procedure for a background shell job** (`stryker-run.ps1` in step 5,
-`worktree.ps1 -EnsureBase` in step 7): same paired-timer start, but there's no
-`SendMessage` target — on the timer firing first, stream the status line, then
-check the job's actual state (its own log/output files, or `TaskOutput` if the
-harness exposes it for that background task) rather than nudging: growing
-output → extend once with a timer at half the original ceiling; no progress /
-process gone → `DEGRADED` row with real elapsed time, run continues without that
-phase's result (e.g., mutation results marked not completed this run).
+`worktree.ps1 -EnsureBase` in step 7): same paired-timer start (plus the same
+`watchdog-state.ps1 -Arm`/step-0 `-CheckOverdue`/`-Clear` discipline as above),
+but there's no `SendMessage` target — on the timer firing first (or step 0
+finding it overdue), stream the status line, then check the job's actual state
+(its own log/output files, or `TaskOutput` if the harness exposes it for that
+background task) rather than nudging: growing output → extend once with a
+timer at half the original ceiling (re-`-Arm` the same `-Label`); no progress /
+process gone → `DEGRADED` row with real elapsed time (`-Clear` the entry), run
+continues without that phase's result (e.g., mutation results marked not
+completed this run).
 
 ## Run loop
 
@@ -362,7 +411,10 @@ phase's result (e.g., mutation results marked not completed this run).
    was ad hoc the first time it happened; it's the rule now, since suggestedFix
    drafting is model/file work with nothing to wait on once the driver's
    results exist). Apply the watchdog to this dispatch too (ceiling 4.5 min,
-   same agent). Then **`scripts/worktree.ps1 -Ensure` again** (cheap reuse
+   same agent — use a distinct `-Label` such as `qa-mutation-author-suggestedfix`
+   for its `watchdog-state.ps1 -Arm`/`-Clear` calls, so it can't collide with
+   step 4's earlier `qa-mutation-author` entry). Then **`scripts/worktree.ps1
+   -Ensure` again** (cheap reuse
    reset — removes the AGENTQ_MUTANT switches; generated tests re-materialize
    from staging; stryker-run refuses to start while switches remain) →
    `scripts/stryker-run.ps1` (**must be a background shell job, not a

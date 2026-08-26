@@ -124,6 +124,19 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
   (darwin/linux + arm64/amd64, not just windows/amd64). When a script can't
   reasonably be tested on the other OS in this session, say so explicitly
   rather than silently assuming Windows-only is good enough.
+  **Known environment quirk (verified live 2026-08-26):** a `pwsh` process
+  spawned nested under this VS Code extension's Bash tool can inherit a
+  narrowed `PATHEXT` (observed: `.CPL` only) instead of Windows' normal
+  default — this breaks `Get-Command`/bare `& git`/`& dotnet` resolution even
+  though the executable IS on PATH, and cost one run ~10 minutes of live,
+  ad hoc rediscovery (the orchestrator patching every subsequent `pwsh` call
+  by hand) before `scripts/pathext-guard.ps1` existed. Every script that
+  resolves a tool by bare name now dot-sources `pathext-guard.ps1` near its
+  top (see `worktree.ps1`, `warm-cache.ps1`, `setup-mcp.ps1`, `check-mcp.ps1`,
+  `run-tests.ps1`) — idempotent, a no-op when `PATHEXT` is already correct,
+  and a no-op entirely on macOS/Linux. A new script that shells out to a
+  bare-named executable should dot-source it too, before its first
+  `Get-Command`/`&` call.
 - **Product repos are read-only.** All work products live in this repo's
   `workspace/` (worktrees, coverage, caches) and `reports/`. The single exception:
   generated tests the developer explicitly asked to keep, applied as a diff they

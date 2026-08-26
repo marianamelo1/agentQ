@@ -88,6 +88,9 @@ $script:IsWin = $true
 $__winVar = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
 if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
 
+# See pathext-guard.ps1: repairs a narrowed PATHEXT before any git resolution below.
+. (Join-Path $PSScriptRoot 'pathext-guard.ps1')
+
 # WHY: git emits UTF-8 on stdout, but Windows PowerShell 5.1 decodes native output with the
 # OEM codepage by default  -  non-ASCII file names in diff/ls-files output would be mangled and
 # then fail to round-trip into worktree copies. Best-effort: some hosts refuse the assignment.

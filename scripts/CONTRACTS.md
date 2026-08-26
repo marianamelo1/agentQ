@@ -652,6 +652,41 @@ one with `executionState: "EXECUTED_PASSED"` and `vacuityGrade:
 or `static_only` earns no credit — only proven-non-vacuous evidence moves this
 number.
 
+## watchdog-state.json  (scripts/watchdog-state.ps1 — SKILL.md's watchdog section)
+Durable record of in-flight agent-dispatch deadlines, workspace-fenced.
+WHY this exists (verified live 2026-08-26): the watchdog's paired background
+timer (`sleep <ceilingSeconds>` / `Start-Sleep`, batched with the `Agent`
+dispatch) is enforced purely by the orchestrator LLM remembering to issue it
+correctly every single time — nothing previously checked whether that actually
+happened. A qa-intake dispatch ran ~10 minutes (over 3x its 3-min ceiling) with
+none of SKILL.md's nudge/re-dispatch/degrade behavior visible — consistent
+with the paired timer having been narrated but never actually issued. This
+file makes the deadline a fact on disk instead of something held only in the
+orchestrator's in-context memory for one turn: on ANY re-invocation, for ANY
+reason, `-CheckOverdue` cheaply reports every entry whose deadline has passed,
+catching a stall even when its own timer notification was skipped or lost.
+```json
+{
+  "entries": [
+    { "label": "qa-intake", "agent": "qa-intake", "dispatchedAt": "2026-08-26T23:55:10Z", "ceilingSeconds": 180, "deadlineAt": "2026-08-26T23:58:10Z" }
+  ]
+}
+```
+`label` is the entry's key (defaults to `agent` when the orchestrator doesn't
+pass an explicit one) — an explicit `-Label` is required when the SAME agent
+is dispatched more than once in a run (e.g. `qa-mutation-author`'s design
+dispatch vs its later suggestedFix dispatch), so the two don't collide.
+`-Arm` replaces any existing entry sharing the same `label` (a re-dispatch
+re-arms with a fresh deadline under the same key). `-Clear` removes an entry
+once its dispatch completes normally OR its stall is finally resolved
+(succeeded on retry, or given up and logged to `time-ledger.json` as
+`DEGRADED`) — a cleared entry stops being reported as overdue since it's
+already been handled. `-CheckOverdue` is read-only and side-effect-free; its
+one stdout line **is** its JSON payload (`{overdue: [...]}`), same exception
+to the one-prose-line convention as `worktree.ps1 -DetectRepo`. A corrupt or
+half-written state file is never trusted — treated as empty rather than
+crashing a run over a bookkeeping artifact.
+
 ## time-ledger.json  (orchestrator appends per phase)
 ```json
 {
@@ -679,7 +714,19 @@ Background-agent & background-job watchdog section)**: `watchdogFired` (bool),
 `retried` (bool — a fresh re-dispatch was attempted), `retrySucceeded` (bool, only
 meaningful when `retried` is true), `runBudgetRemainingAtRetrySec` (the 10-minute
 run budget's remaining seconds at the retry/give-up decision — lets a later reader
-see whether a give-up was a real budget shortage or the one-retry-max rule).
+see whether a give-up was a real budget shortage or the one-retry-max rule),
+`dispatchedAt`/`ceilingSeconds`/`caughtBy` — sourced from the
+`watchdog-state.json` entry (`scripts/watchdog-state.ps1`, CONTRACTS.md above)
+at the moment the stall was handled, not from the orchestrator's memory of when
+it dispatched: `dispatchedAt` and `ceilingSeconds` copy that entry's own
+fields verbatim, and `caughtBy` is `"paired-timer"` (the dispatch's own timer
+fired) or `"check-overdue"` (a DIFFERENT re-invocation's step-0
+`-CheckOverdue` call found it overdue — i.e. the paired timer notification was
+skipped, lost, or never issued, and something else caught the stall instead).
+`caughtBy: "check-overdue"` on a run is itself worth noticing: it means the
+paired-timer half of the watchdog didn't fire as designed for that dispatch —
+worth a look at whether the batch that issued the dispatch also issued the
+timer call.
 **`seconds` on a stalled phase is ALWAYS the real elapsed wall-clock, including the
 stall** — never `0.0`, never a placeholder, never "not comparable" (the corrected-
 ledger rule from the 2026-08-25 incident: an earlier version of this file recorded
