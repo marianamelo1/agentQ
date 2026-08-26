@@ -114,6 +114,21 @@ function Set-MutantResult {
     $Mutant | Add-Member -NotePropertyName statusReason    -NotePropertyValue $Reason -Force
 }
 
+function Stop-ProcessTree {
+    # Same cross-platform tree-kill as stryker-run.ps1's Stop-ProcessTree -- a
+    # wedged testhost/vstest child would otherwise survive the parent shell
+    # wrapper being killed and keep holding file locks / CPU.
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    if ($script:IsWin) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+        $ErrorActionPreference = $prev
+    } else {
+        try { [System.Diagnostics.Process]::GetProcessById($ProcessId).Kill($true) } catch { }
+    }
+}
+
 function Test-BootsWebFactory {
     # TRUE when the test project can boot a WebApplicationFactory (references
     # Microsoft.AspNetCore.Mvc.Testing directly or via one ProjectReference
@@ -197,6 +212,20 @@ $ZeroMatchPattern = 'No test matches the given testcase filter|No test is availa
 $manifestPath = (Resolve-Path -LiteralPath $Manifest).Path
 $run          = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $workspaceDir = Get-Prop $run 'workspaceDir'
+
+# Per-mutant anti-hang budget: same calibrated-multiple pattern as run-tests.ps1
+# (6x a calibrated plain run, floor 120s, flat fallback on a repo with no
+# calibration yet) -- a wedged testhost under one mutant used to hang this
+# script forever (Invoke-MutantBatch's poll loop had no deadline at all).
+$mutantTimeoutSec = 480
+$calibPathForTimeout = Join-Path (Split-Path -Parent $workspaceDir) 'calibration.json'
+if (Test-Path -LiteralPath $calibPathForTimeout) {
+    try {
+        $calibForTimeout = Get-Content -LiteralPath $calibPathForTimeout -Raw | ConvertFrom-Json
+        $plainCalibForTimeout = [double](Get-Prop $calibForTimeout 'plainRunSeconds' 0)
+        if ($plainCalibForTimeout -gt 0) { $mutantTimeoutSec = [Math]::Max(120, [int]($plainCalibForTimeout * 6)) }
+    } catch { }   # unreadable/corrupt calibration -- fall back to the flat default, never throw
+}
 $worktreeDir  = Get-Prop $run 'worktreeDir'
 if (-not $workspaceDir -or -not (Test-Path -LiteralPath $workspaceDir)) {
     throw "run-manifest.json has no resolvable workspaceDir ('$workspaceDir')."
@@ -413,7 +442,7 @@ foreach ($m in $runnable) {
         M = $m; Id = $id; Filter = $filter; TrxPath = $trxPath; LogPath = $logPath
         CmdLine = $line
         Boots = (Test-BootsWebFactory -ProjAbs $proj)
-        Proc = $null; Sw = $null; Seconds = 0.0
+        Proc = $null; Sw = $null; Seconds = 0.0; TimedOut = $false
     })
 }
 
@@ -441,8 +470,10 @@ function Start-MutantProcess {
 }
 
 function Invoke-MutantBatch {
-    # Bounded scheduler: fill slots, poll, refill. No deadline valve  -  parity
-    # with the old sequential behavior (the orchestrator's own anti-hang applies).
+    # Bounded scheduler: fill slots, poll, refill, kill on deadline. Each spec
+    # gets its own $mutantTimeoutSec wall-clock budget from when ITS process
+    # actually starts (not from batch start) -- a spec that waited in queue
+    # behind a full throttle isn't penalized for someone else's runtime.
     param([AllowEmptyCollection()][object[]]$Specs, [int]$Throttle)
     if (@($Specs).Count -eq 0) { return }
     $pending = New-Object 'System.Collections.Generic.Queue[object]'
@@ -462,6 +493,16 @@ function Invoke-MutantBatch {
                 $spec.Sw.Stop()
                 $spec.Seconds = $spec.Sw.Elapsed.TotalSeconds
                 $spec.ExitCode = $spec.Proc.ExitCode
+                $running.RemoveAt($i)
+            }
+            elseif ($spec.Sw.Elapsed.TotalSeconds -gt $mutantTimeoutSec) {
+                Write-Verbose "Mutant $($spec.Id) exceeded ${mutantTimeoutSec}s -- killing process tree"
+                Stop-ProcessTree -ProcessId $spec.Proc.Id
+                $null = $spec.Proc.WaitForExit(15000)   # let the tree-kill land
+                $spec.Sw.Stop()
+                $spec.Seconds = $spec.Sw.Elapsed.TotalSeconds
+                $spec.TimedOut = $true
+                $spec.ExitCode = -1
                 $running.RemoveAt($i)
             }
         }
@@ -486,7 +527,16 @@ foreach ($spec in $mutantSpecs) {
     $secs = $spec.Seconds
     $exit = [int]$spec.ExitCode
 
-    if ($outText -match $ZeroMatchPattern) {
+    if ([bool]$spec.TimedOut) {
+        # Anti-hang valve tripped -- never Survived (a hung run is not a clean
+        # green result) and never Killed (we don't have a real failing test to
+        # name). merge-mutation-reports.ps1 maps this to the schema's own
+        # 'Timeout' status, the same "counts as detected, not asserted as a
+        # clean kill" treatment Stryker's own timeouts already get.
+        Set-MutantResult -Mutant $m -Status 'TimedOut' -KilledBy @() -TestsCompleted $trx.Executed `
+            -DurationSeconds $secs -Reason "test run exceeded the ${mutantTimeoutSec}s anti-hang valve and its process tree was killed"
+    }
+    elseif ($outText -match $ZeroMatchPattern) {
         # WHY Ignored, never Survived: zero matched tests is zero evidence.
         Set-MutantResult -Mutant $m -Status 'Ignored' -KilledBy @() -TestsCompleted $trx.Executed `
             -DurationSeconds $secs -Reason "filter '$filter' matched zero tests"

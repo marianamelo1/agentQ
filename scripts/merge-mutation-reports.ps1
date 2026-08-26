@@ -358,6 +358,16 @@ if ($haveMutants) {
         switch ($rawStatus) {
             'Survived' { $status = 'Survived' }
             'Killed'   { $status = 'Killed' }
+            'TimedOut' {
+                # Same convention as Stryker's own native Timeout status (Get-StatusRank
+                # above ranks it as detected, between Killed and Survived): the driver's
+                # anti-hang valve killed a wedged test process, so this is neither a
+                # clean kill (no failing test to name) nor a clean survive (we never
+                # got a green result) -- "detected via hang" is the honest middle ground.
+                $status = 'Timeout'
+                if ($driverReason -ne '') { $reasons.Add($driverReason) }
+                else { $reasons.Add('semantic-mutant-driver anti-hang valve tripped') }
+            }
             'BaselineBroken' {
                 $status = 'Ignored'
                 if ($driverReason -ne '') { $reasons.Add("BaselineBroken: $driverReason") }

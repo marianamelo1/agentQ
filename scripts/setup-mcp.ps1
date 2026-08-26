@@ -298,10 +298,13 @@ if (Get-Command claude -ErrorAction SilentlyContinue) {
     $answer = Read-Host -Prompt "  Run the official installer now? (Enter = yes, n = skip)"
     if ($answer -notmatch '^n') {
         if ($IsWin) {
-            Invoke-RestMethod 'https://claude.ai/install.ps1' | Invoke-Expression
+            Invoke-RestMethod 'https://claude.ai/install.ps1' -TimeoutSec 120 | Invoke-Expression
             Update-ProcessPath
         } else {
-            & bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+            # WHY --max-time on curl: same anti-hang reasoning as the Windows branch's
+            # -TimeoutSec -- a stalled connection here would otherwise block this
+            # interactive setup script indefinitely with no feedback.
+            & bash -c 'curl -fsSL --max-time 120 https://claude.ai/install.sh | bash'
         }
         if (Test-Path $claudeExeFallback) { Add-ClaudeBinToPath }
         $claudeOk = [bool]((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeExeFallback))

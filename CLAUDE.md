@@ -177,14 +177,44 @@ up to 3-at-a-time with `MaxCpuCount` divided so machine load stays ~constant;
 anything factory-booting runs strictly one-at-a-time with all cores — each run
 entry's `runNote` states which lane it got and why.
 
-## Performance principles (fast by construction — no SLA, no cutoffs)
+## Performance principles (fast by construction — target: 10 minutes, max)
 
-A typical full run lands around 3–5 minutes; a steady-state re-run on an unchanged
-branch well under one. Nothing stops because time passed — the only hard timeouts
-are generous anti-hang safety valves for known pathological cases (coverage
-collection has documented 4×–47× blowups; Stryker has no time-limit option), and
-tripping one degrades honestly, never silently.
+**Target (set 2026-08-25): a full run takes 10 minutes at most.** Honest ranges:
+steady-state re-run 5–7 min; clean full run 8–10 min; a run where one background
+agent stalls, +4–5 min over those (a stall can't be made free, only capped — see
+the run-budget watchdog below). First-ever run on a newly registered repo (cold
+worktrees, no calibration, cold builds) is 15–25 min and honestly cannot meet the
+10-minute target today — tracked as its own improvement item, mitigated for now by
+`scripts/warm-cache.ps1` run unattended (e.g. nightly).
 
+Nothing stops because time passed for its own sake — every hard timeout in this
+tool is either (a) a generous anti-hang safety valve for a known pathological case
+at the script level (coverage collection has documented 4×–47× blowups; Stryker
+has no time-limit option of its own), or (b) the **orchestrator-level agent-dispatch
+watchdog**: every background subagent dispatch (`qa-intake`, `qa-analyst`,
+`qa-scenario-writer`, `qa-mutation-author`, `qa-report-synthesizer`,
+`qa-e2e-author`) is paired with a background timer at 1.5× that agent's target
+duration (floor 3 min) started in the same tool-call batch as the dispatch; a
+timer that fires before the agent's own completion notification means the
+dispatch is running unusually long or has stalled outright (verified live
+2026-08-25: a session-level stream stall left two agents silent for 52 minutes
+with zero recovery, because no such watchdog existed) — see `.claude/skills/
+qa-review/SKILL.md`'s watchdog section for the full nudge/re-dispatch/degrade
+procedure, gated by a 10-minute run-wide budget so a retry can never blow the
+target. Both kinds of timeout degrade honestly, never silently, and the real
+elapsed time (including any stall) is always what lands in `time-ledger.json` —
+never zeroed out or approximated away, even when the cause is infrastructure
+flakiness rather than agentQ's own work.
+
+- Lean orchestrator turns: deterministic script sequences with zero judgment
+  between them (`merge-mutation-reports.ps1` → `risk-score.ps1`; the preflight
+  `-Heal` → `-EnsureWorkspace` → `-DiffSet` trio; the report's ledger-append →
+  `render-evidence.ps1` → BOM re-save) run as ONE chained command, not N
+  round-trips, and `scripts/report-pack.ps1` mechanically assembles an agent
+  dispatch's inline evidence pack instead of the orchestrator hand-composing
+  it — verified live (2026-08-25) that hand-composing was one of the longest
+  single orchestrator turns in a run, and that a heavier orchestrator context
+  correlates with mid-run compaction risk (one froze a run for ~3.5 minutes).
 - Do less, not faster: affected-subset tests only, at TEST-CLASS granularity —
   filters derive from both sides of the diff (SUT files → `<Class>Tests`, changed
   test-project files → their own class names, untracked files included); a profile
@@ -787,14 +817,25 @@ everything the main report dropped, at full rigor:
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
 | `qa-report-synthesizer` | The main report only — selects/ranks findings into `report-selection.json` | every run |
 
-**Model tiers**: `qa-intake` and `qa-report-synthesizer` are pinned to a faster
-model (`model: sonnet` in their frontmatter) — both sit alone on the critical
-path (intake opens every run, the report closes it with nothing overlapping)
-and their work is rule-following extraction/rendering, not open judgment. The
-other four inherit the session model: qa-analyst and qa-mutation-author carry
-the judgment the tool's findings depend on, qa-scenario-writer's tests must
-compile first try (a bad render burns a CPU cycle), and qa-e2e-author runs in
-the background where a faster model buys no wall-clock.
+**Model tiers**: `qa-intake`, `qa-report-synthesizer`, and (as of 2026-08-25,
+Phase E) `qa-analyst` are pinned to a faster model (`model: sonnet` in their
+frontmatter). Intake and the report sit alone on the critical path (intake
+opens every run, the report closes it with nothing overlapping) and their
+work is rule-following extraction/rendering, not open judgment — the original
+rationale for both. `qa-analyst`'s pin is different in kind: it DOES carry
+judgment the findings depend on, but it's pinned anyway because the Phase 2
+prompt diet (inline evidence pack, ~15-call budget, hardened trust rule)
+measured 437.1s → 377.7s on an identical diff — real, but still short of the
+180s target on the run's single longest agent — and that diet already
+reshaped the role into structured, rule-following output (a fixed
+`analyst-brief.json` schema, inline evidence instead of open exploration)
+rather than removing the pin's justification. Mitigation if quality regresses:
+compare against the pre-pin EC-76015 brief and revert. The other three inherit
+the session model: qa-mutation-author's business-rule mutant design is the
+one part of that judgment not yet proven safe to downgrade,
+qa-scenario-writer's tests must compile first try (a bad render burns a CPU
+cycle), and qa-e2e-author runs in the background where a faster model buys no
+wall-clock.
 
 ## /qa-impact — blast-radius analysis (standalone entry point)
 

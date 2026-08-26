@@ -129,47 +129,88 @@ function ConvertTo-LevelName {
     }
 }
 
+function Stop-ProcessTree {
+    # Same cross-platform tree-kill as stryker-run.ps1's Stop-ProcessTree.
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    if ($script:IsWin) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+        $ErrorActionPreference = $prev
+    } else {
+        try { [System.Diagnostics.Process]::GetProcessById($ProcessId).Kill($true) } catch { }
+    }
+}
+
 function Invoke-Native {
-    # Run a native exe capturing stdout/stderr via file redirection.
+    # Run a native exe capturing stdout/stderr.
     # WHY not `& exe 2>&1`: PS 5.1 wraps redirected native stderr lines in
     # ErrorRecords, which $ErrorActionPreference='Stop' can promote to terminating
-    # errors mid-run; Start-Process file redirection is byte-faithful (matters for
-    # UTF-8 spec content -- PowerShell string capture re-decodes with the console
-    # codepage and can mangle non-ASCII) and has no error-stream side effects.
+    # errors mid-run; going through Process.Start avoids that entirely.
+    # WHY ProcessStartInfo.ArgumentList.Add() per element, not a manually-quoted
+    # joined string: verified live (2026-08-25) that the manual "Minimal Win32 arg
+    # quoting" approach this function used to use IS correct on Windows (spaces,
+    # embedded quotes, empty strings all confirmed intact) -- but that correctness
+    # rested on an assumption about Windows CreateProcess conventions with no
+    # verified basis for macOS/Linux. ArgumentList.Add() is .NET's own documented
+    # cross-platform argv mechanism (proper escaping on Windows, direct argv on
+    # Unix, no re-parsing step on either OS) -- removing the question rather than
+    # inheriting an unverified assumption. Every call site in this file invokes a
+    # real executable directly (git, oasdiff) -- never a shell wrapper -- so this
+    # applies everywhere in this file with no exceptions (unlike stryker-run.ps1,
+    # which keeps ONE legacy string-mode call site for an actual cmd.exe /c shim).
+    # WHY ReadToEndAsync, not file redirection: started immediately after
+    # Process.Start(), read back after WaitForExit -- avoids the classic
+    # redirect-pipe deadlock without needing Start-Process's file-redirection
+    # convenience (unavailable once ArgumentList is used instead of a joined
+    # -ArgumentList string). Verified live with a real 20,000-line child process.
+    # Explicit UTF8 StandardOutput/StandardErrorEncoding preserves the original
+    # byte-faithful intent (git/oasdiff emit UTF-8; the OS-default console
+    # codepage would otherwise mangle non-ASCII spec content on decode).
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [string]$StdOutFile   # when given, stdout goes straight to this file and is not read back
+        [string]$StdOutFile,  # when given, stdout is written straight to this file and not read back
+        [int]$TimeoutSec = 0  # 0 = no timeout (git plumbing calls -- already fast/local)
     )
-    $readBack = [string]::IsNullOrEmpty($StdOutFile)
-    if ($readBack) {
-        $outFile = Join-Path $script:TempDir ('native-out-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    foreach ($a in $Arguments) { $null = $psi.ArgumentList.Add($a) }
+
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+    $stderrTask = $p.StandardError.ReadToEndAsync()
+    $timedOut = $false
+    if ($TimeoutSec -gt 0) {
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            $timedOut = $true
+            Stop-ProcessTree -ProcessId $p.Id
+            $null = $p.WaitForExit(15000)
+        }
     } else {
-        $outFile = $StdOutFile
+        $p.WaitForExit()
     }
-    $errFile = Join-Path $script:TempDir ('native-err-' + [guid]::NewGuid().ToString('N') + '.txt')
-
-    # Minimal Win32 arg quoting: quote when whitespace/quotes present, escape
-    # embedded quotes. Start-Process passes the line to CreateProcess (no shell),
-    # so glob characters reach git untouched and git does its own pathspec match.
-    $argLine = ($Arguments | ForEach-Object {
-        if ($_ -eq '') { '""' }
-        elseif ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' }
-        else { $_ }
-    }) -join ' '
-
-    $p = Start-Process -FilePath $Exe -ArgumentList $argLine -Wait -NoNewWindow -PassThru `
-        -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $stdoutText = ''
+    try { $stdoutText = $stdoutTask.GetAwaiter().GetResult() } catch { }
+    $stderr = ''
+    try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { }
+    if ($timedOut) { $stderr = "[agentQ] process exceeded ${TimeoutSec}s and was killed`n$stderr" }
 
     $stdout = $null
-    if ($readBack) {
-        $stdout = [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::UTF8)
-        try { Remove-Item -LiteralPath $outFile -Force -Confirm:$false } catch { }
+    if ([string]::IsNullOrEmpty($StdOutFile)) {
+        $stdout = $stdoutText
+    } else {
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        try { [System.IO.File]::WriteAllText($StdOutFile, $stdoutText, $enc) } catch { }
     }
-    $stderr = [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::UTF8)
-    try { Remove-Item -LiteralPath $errFile -Force -Confirm:$false } catch { }
 
-    return [pscustomobject]@{ ExitCode = $p.ExitCode; StdOut = $stdout; StdErr = $stderr }
+    $exitCode = if ($timedOut) { -1 } else { $p.ExitCode }
+    return [pscustomobject]@{ ExitCode = $exitCode; StdOut = $stdout; StdErr = $stderr; TimedOut = $timedOut }
 }
 
 function Install-Oasdiff {
@@ -218,8 +259,8 @@ function Install-Oasdiff {
     $archive   = Join-Path $script:ToolsDir $asset
     $checksums = Join-Path $script:ToolsDir 'oasdiff-checksums.txt'
 
-    Invoke-WebRequest -Uri "$baseUrl/$asset" -OutFile $archive -UseBasicParsing
-    Invoke-WebRequest -Uri "$baseUrl/checksums.txt" -OutFile $checksums -UseBasicParsing
+    Invoke-WebRequest -Uri "$baseUrl/$asset" -OutFile $archive -UseBasicParsing -TimeoutSec 120
+    Invoke-WebRequest -Uri "$baseUrl/checksums.txt" -OutFile $checksums -UseBasicParsing -TimeoutSec 120
 
     # sha256 gate -- fail hard on any mismatch. WHY: supply-chain hygiene for a
     # binary we execute; a tampered or truncated download must never run.
@@ -308,20 +349,26 @@ function Invoke-OasdiffDiff {
 
     $result = @{ breaking = @(); warnings = @(); info = @(); skipped = $false; skipReason = $null }
 
-    $br = Invoke-Native -Exe $script:OasdiffExe -Arguments @('breaking', $BaseFile, $RevFile, '--format', 'json')
+    $br = Invoke-Native -Exe $script:OasdiffExe -Arguments @('breaking', $BaseFile, $RevFile, '--format', 'json') -TimeoutSec 60
     $parsed = ConvertFrom-OasdiffOutput $br
     if (-not $parsed.Ok) {
         # Parse failure (e.g. unsupported spec version): honest skip, naming the
         # version when it can be extracted from the diagnostics.
         $result.skipped = $true
-        $hint = Get-SpecVersionHint ("$($br.StdOut)`n$($br.StdErr)")
-        if ($hint) {
-            $result.skipReason = "oasdiff could not parse the spec -- unsupported spec version: $hint"
+        if ($br.TimedOut) {
+            # Two local files being diffed -- a real hang here means oasdiff itself
+            # is wedged (pathological spec size/shape), not a slow environment.
+            $result.skipReason = 'oasdiff exceeded its 60s anti-hang valve and was killed -- contract lane could not complete'
         } else {
-            $firstLine = @(($br.StdErr -split "`r?`n") | Where-Object { $_ -match '\S' }) | Select-Object -First 1
-            if (-not $firstLine) { $firstLine = "exit code $($br.ExitCode), no diagnostics on stderr" }
-            if ($firstLine.Length -gt 300) { $firstLine = $firstLine.Substring(0, 300) }
-            $result.skipReason = "oasdiff failed to parse the spec: $firstLine"
+            $hint = Get-SpecVersionHint ("$($br.StdOut)`n$($br.StdErr)")
+            if ($hint) {
+                $result.skipReason = "oasdiff could not parse the spec -- unsupported spec version: $hint"
+            } else {
+                $firstLine = @(($br.StdErr -split "`r?`n") | Where-Object { $_ -match '\S' }) | Select-Object -First 1
+                if (-not $firstLine) { $firstLine = "exit code $($br.ExitCode), no diagnostics on stderr" }
+                if ($firstLine.Length -gt 300) { $firstLine = $firstLine.Substring(0, 300) }
+                $result.skipReason = "oasdiff failed to parse the spec: $firstLine"
+            }
         }
         return $result
     }
@@ -342,7 +389,7 @@ function Invoke-OasdiffDiff {
 
     # Info tail from `changelog`. Only INFO-level entries are taken: ERR/WARN
     # already came from `breaking` above -- filtering avoids double-reporting.
-    $cl = Invoke-Native -Exe $script:OasdiffExe -Arguments @('changelog', $BaseFile, $RevFile, '--format', 'json')
+    $cl = Invoke-Native -Exe $script:OasdiffExe -Arguments @('changelog', $BaseFile, $RevFile, '--format', 'json') -TimeoutSec 60
     $clParsed = ConvertFrom-OasdiffOutput $cl
     if ($clParsed.Ok) {
         foreach ($e in $clParsed.Entries) {

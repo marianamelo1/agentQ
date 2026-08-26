@@ -93,6 +93,12 @@ if ($null -ne $__winVar) { $script:IsWin = [bool]$__winVar.Value }
 # then fail to round-trip into worktree copies. Best-effort: some hosts refuse the assignment.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+# WHY: a git call that hits a credential prompt (a private remote with no cached
+# credential, a misconfigured URL) would otherwise hang forever waiting on a
+# terminal no one is watching -- fail fast instead, on every git call this
+# script makes, not just the timed ones below.
+$env:GIT_TERMINAL_PROMPT = '0'
+
 # Derive the agentQ root from the script location instead of hardcoding C:\agentQ, so the
 # write-fence (workspace/) follows the repo wherever it is checked out.
 $script:AgentQRoot    = Split-Path -Parent $PSScriptRoot
@@ -127,6 +133,86 @@ function Invoke-Git {
     # WHY the comma operator: PS unrolls a returned array  -  a single-line result would come back
     # as a bare string, breaking callers' [0] indexing and .Count under StrictMode.
     return ,@($out)
+}
+
+function Stop-ProcessTree {
+    # Same cross-platform tree-kill as stryker-run.ps1's Stop-ProcessTree.
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    if ($script:IsWin) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & cmd.exe /d /c "taskkill /PID $ProcessId /T /F >nul 2>&1" | Out-Null } catch { }
+        $ErrorActionPreference = $prev
+    } else {
+        try { [System.Diagnostics.Process]::GetProcessById($ProcessId).Kill($true) } catch { }
+    }
+}
+
+function Invoke-GitTimed {
+    # For the git operations that can genuinely hang -- fetch (network), worktree
+    # add and checkout (large/long-path repos, antivirus interference, a stuck
+    # filesystem) -- Invoke-Git's `&` call operator above has NO timeout
+    # mechanism at all. Local plumbing calls (rev-parse, status, worktree
+    # list/prune) deliberately keep using the cheap `&` form: they're already
+    # instant, and Start-Process's per-call spawn overhead isn't worth paying
+    # for every one of them.
+    # WHY ProcessStartInfo.ArgumentList.Add() per element, not a manually-quoted
+    # string passed to the Start-Process CMDLET: verified live (2026-08-25) that
+    # Start-Process -ArgumentList <string[]> does NOT give each array element its
+    # own argv slot on Windows -- it silently re-joins-and-splits on whitespace,
+    # so a path/branch name containing a space would SILENTLY BREAK into two
+    # arguments unless manually quoted. .ArgumentList.Add() is .NET's own
+    # documented cross-platform mechanism (correct Win32 escaping on Windows,
+    # direct argv on Unix) with NO re-parsing step on either OS -- removing the
+    # quoting question entirely instead of hand-rolling Windows-only quoting
+    # rules and hoping they also hold on macOS/Linux.
+    # WHY ReadToEndAsync before WaitForExit, not redirected-to-file output: the
+    # classic redirect deadlock (child fills the OS pipe buffer before the
+    # parent reads it) is avoided by draining both streams asynchronously from
+    # the moment the process starts, same standard .NET pattern used to avoid
+    # this without needing Start-Process's file-redirection convenience (which
+    # is unavailable when using raw ProcessStartInfo for its ArgumentList).
+    # Verified live with a real 20,000-line-output child process -- no hang.
+    param(
+        [Parameter(Mandatory = $true)][string]$Dir,
+        [Parameter(Mandatory = $true)][string[]]$GitArgs,
+        [Parameter(Mandatory = $true)][int]$TimeoutSec,
+        [switch]$AllowFail
+    )
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'git'
+    $psi.WorkingDirectory = $Dir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $null = $psi.ArgumentList.Add('-c')
+    $null = $psi.ArgumentList.Add('core.longpaths=true')
+    foreach ($a in $GitArgs) { $null = $psi.ArgumentList.Add($a) }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $timedOut = $false
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+        $timedOut = $true
+        Stop-ProcessTree -ProcessId $proc.Id
+        $null = $proc.WaitForExit(15000)
+    }
+    $stdout = ''
+    try { $stdout = $stdoutTask.GetAwaiter().GetResult() } catch { }
+    $stderr = ''
+    try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch { }
+    $exitCode = if ($timedOut) { -1 } else { $proc.ExitCode }
+    $script:LastGitExit = $exitCode
+
+    if ($timedOut) {
+        throw "git -C `"$Dir`" $($GitArgs -join ' ') timed out after ${TimeoutSec}s and its process tree was killed"
+    }
+    if ($exitCode -ne 0 -and -not $AllowFail) {
+        throw "git -C `"$Dir`" $($GitArgs -join ' ') failed (exit $exitCode): $stderr"
+    }
+    if ($stdout -eq '') { return ,@() }
+    return ,@(($stdout -split "`r?`n") | Where-Object { $_ -ne '' })
 }
 
 function Write-JsonFile {
@@ -223,7 +309,7 @@ function Restore-BranchState {
     # WHY --force: a crashed mutation run can leave mutated *tracked sources* behind
     # (semantic-mutant const->property promotion happens in the worktree copy). The worktree
     # is disposable by design; the dev's tree is the single source of truth.
-    $null = Invoke-Git -Dir $WorktreeDir -GitArgs @('checkout', '--force', '--detach', $tipSha)
+    $null = Invoke-GitTimed -Dir $WorktreeDir -GitArgs @('checkout', '--force', '--detach', $tipSha) -TimeoutSec 300
 
     # Re-apply the dev's uncommitted (tracked) changes.
     # WHY --output + a file (not a PowerShell pipe): PS 5.1 re-encodes and CRLF-mangles piped
@@ -539,7 +625,7 @@ function Invoke-ModeEnsureWorkspace {
     # Fresh refs BEFORE pinning the merge-base. WHY fail-hard on fetch: proceeding with stale
     # refs can pin a wrong baseSha, which mis-scopes every diff-based phase silently  - 
     # honesty over completeness says fail loud instead.
-    $null = Invoke-Git -Dir $repo -GitArgs @('fetch', 'origin')
+    $null = Invoke-GitTimed -Dir $repo -GitArgs @('fetch', 'origin') -TimeoutSec 120
     $fetchedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
 
     # Base ref: origin/HEAD when the clone knows it; otherwise the first of main/master/develop
@@ -739,7 +825,7 @@ function Invoke-ModeEnsure {
         # Prune first: git refuses to add a worktree at a path it still holds stale metadata for
         # (exactly the state a crashed prior run leaves behind).
         $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'prune')
-        $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wt, 'HEAD')
+        $null = Invoke-GitTimed -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wt, 'HEAD') -TimeoutSec 300
     }
 
     # WHY a link, not a copy: node_modules is gitignored (never checked out into a new
@@ -816,13 +902,13 @@ function Invoke-ModeEnsureBase {
     if (-not $reused) {
         if (-not (Test-Path -LiteralPath $ws)) { New-Item -ItemType Directory -Force -Path $ws | Out-Null }
         $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'prune')
-        $null = Invoke-Git -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wtb, $m.baseSha)
+        $null = Invoke-GitTimed -Dir $repo -GitArgs @('worktree', 'add', '--detach', $wtb, $m.baseSha) -TimeoutSec 300
     }
     else {
         # WHY -fd and not -fdx: ignored bin/obj are the warm build cache we keep on
         # purpose. Clean sweeps stale generated tests; checkout pins the exact base.
         $null = Invoke-Git -Dir $wtb -GitArgs @('clean', '-fd')
-        $null = Invoke-Git -Dir $wtb -GitArgs @('checkout', '--force', '--detach', $m.baseSha)
+        $null = Invoke-GitTimed -Dir $wtb -GitArgs @('checkout', '--force', '--detach', $m.baseSha) -TimeoutSec 300
     }
 
     # Same node_modules link rationale as -Ensure (gitignored, 1GB+, never
@@ -869,7 +955,7 @@ function Invoke-ModeFlipToBase {
     # WHY --force and NOT `clean -fd`: --force discards tracked modifications and deletes
     # tracked-but-not-in-base files while leaving untracked files (the generated tests) alone;
     # clean -fd would delete the very tests anti-vacuity is about to run.
-    $null = Invoke-Git -Dir $wt -GitArgs @('checkout', '--force', '--detach', $m.baseSha)
+    $null = Invoke-GitTimed -Dir $wt -GitArgs @('checkout', '--force', '--detach', $m.baseSha) -TimeoutSec 300
 
     # Belt-and-braces: re-materialize the staging dir too (idempotent)  -  covers a
     # flip that runs before any generated test ever landed in this worktree.

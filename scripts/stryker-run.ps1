@@ -63,11 +63,17 @@ param(
     # no span scoping and no uncovered-region subtraction.
     [switch]$Deep,
 
-    # Generous anti-hang safety valve, NOT an SLA. Stryker has no time-limit
-    # option and a wedged testhost can hang forever; nothing in this script
-    # treats time as a budget. Tripping the valve kills the process tree,
-    # restores DLL backups, and records partial=true  -  it never reads as a pass.
-    [int]$TimeoutMinutes = 8
+    # Anti-hang safety valve, NOT an SLA. Stryker has no time-limit option and a
+    # wedged testhost can hang forever; nothing in this script treats time as a
+    # budget. Tripping the valve kills the process tree, restores DLL backups,
+    # and records partial=true  -  it never reads as a pass.
+    # WHY 5, not the old flat 8 (tightened 2026-08-25, Phase E): a scoped
+    # (span-limited) run measures ~165s (2.75 min) in practice  -   8 minutes of
+    # headroom was pure worst-case exposure against the 10-minute run target,
+    # and 5 still leaves ~1.8x the measured time. -Deep runs whole files at
+    # Standard level and legitimately takes longer, so it keeps the old 8.
+    # Still overridable explicitly via -TimeoutMinutes for an unusual repo.
+    [int]$TimeoutMinutes = $(if ($Deep) { 8 } else { 5 })
 )
 
 Set-StrictMode -Version Latest
@@ -141,22 +147,84 @@ function Stop-ProcessTree {
 
 function Invoke-Native {
     # Runs one native command with cwd + wall-clock timeout, output to log files.
-    # WHY Start-Process + log files (not `& cmd 2>&1`): keeps stdout clean (the
-    # contract is exactly ONE final summary line), avoids PS 5.1's NativeCommandError
-    # trap on redirected stderr, and gives us a real wall clock + tree kill.
-    # $LASTEXITCODE does not apply to Start-Process  -  the returned ExitCode is the
+    # WHY not `& cmd 2>&1`: PS 5.1 wraps redirected native stderr lines in
+    # ErrorRecords, which $ErrorActionPreference='Stop' can promote to a
+    # terminating error mid-run; going through Process.Start/Start-Process
+    # avoids that entirely and gives a real wall clock + tree kill.
+    # $LASTEXITCODE does not apply here  -  the returned ExitCode is the
     # explicit per-call exit check the coding rules require.
+    #
+    # Two argument-passing modes:
+    #   -ArgvSafe ($Arguments a [string[]]): each element added via
+    #     ProcessStartInfo.ArgumentList.Add() -- .NET's own documented
+    #     cross-platform-correct argv mechanism (proper Win32 escaping on
+    #     Windows, direct argv on Unix, no re-parsing step on either OS). Use
+    #     this for every direct-executable call (dotnet, dotnet-stryker, npx
+    #     on Unix) -- verified live (2026-08-25) against real paths/values
+    #     containing spaces.
+    #   default, no -ArgvSafe ($Arguments a single pre-quoted [string]): the
+    #     ORIGINAL behavior, unchanged. KEPT ONLY for the one cmd.exe /c
+    #     shell-wrapper call site (JS/StrykerJS on Windows, invoking the
+    #     npx.cmd shim) -- verified live that switching THAT case to
+    #     -ArgvSafe breaks it: cmd.exe needs to receive ONE raw command-line
+    #     string after /c and do its own internal reparsing; routing that
+    #     same string through ArgumentList.Add() applies .NET's OWN Win32
+    #     escaping on top of the string's already-embedded quotes, double-
+    #     escaping them into something cmd.exe misinterprets (confirmed: a
+    #     `-File "path"` argument arrived at the wrapped call double-quoted
+    #     and failed to resolve).
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string]$Arguments,
+        [Parameter(Mandatory = $true)]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$LogBase,
-        [int]$TimeoutMs = 0
+        [int]$TimeoutMs = 0,
+        [switch]$ArgvSafe
     )
     $outLog = "$LogBase.out.log"
     $errLog = "$LogBase.err.log"
-    Write-Verbose ("exec: {0} {1}  (cwd={2})" -f $FilePath, $Arguments, $WorkingDirectory)
-    $proc = Start-Process -FilePath $FilePath -ArgumentList $Arguments `
+
+    if ($ArgvSafe) {
+        $argArray = [string[]]$Arguments
+        Write-Verbose ("exec: {0} {1}  (cwd={2})" -f $FilePath, ($argArray -join ' '), $WorkingDirectory)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $FilePath
+        $psi.WorkingDirectory = $WorkingDirectory
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        foreach ($a in $argArray) { $null = $psi.ArgumentList.Add($a) }
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        # ReadToEndAsync from the moment the process starts avoids the classic
+        # redirect-pipe deadlock (child fills the OS buffer before the parent
+        # reads it) -- verified live with a real 20,000-line child process.
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $timedOut = $false
+        if ($TimeoutMs -gt 0) {
+            if (-not $proc.WaitForExit($TimeoutMs)) {
+                $timedOut = $true
+                Stop-ProcessTree -ProcessId $proc.Id
+                $null = $proc.WaitForExit(15000)
+            }
+        } else {
+            $proc.WaitForExit()
+        }
+        $stdoutText = ''
+        try { $stdoutText = $stdoutTask.GetAwaiter().GetResult() } catch { }
+        $stderrText = ''
+        try { $stderrText = $stderrTask.GetAwaiter().GetResult() } catch { }
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        try { [System.IO.File]::WriteAllText($outLog, $stdoutText, $enc) } catch { }
+        try { [System.IO.File]::WriteAllText($errLog, $stderrText, $enc) } catch { }
+        $exitCode = -1
+        if (-not $timedOut) { $exitCode = $proc.ExitCode }
+        return @{ ExitCode = $exitCode; TimedOut = $timedOut; OutLog = $outLog; ErrLog = $errLog }
+    }
+
+    $argString = [string]$Arguments
+    Write-Verbose ("exec: {0} {1}  (cwd={2})" -f $FilePath, $argString, $WorkingDirectory)
+    $proc = Start-Process -FilePath $FilePath -ArgumentList $argString `
         -WorkingDirectory $WorkingDirectory -PassThru -NoNewWindow `
         -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     $timedOut = $false
@@ -535,22 +603,21 @@ function Invoke-OneStryker {
     $exe = 'dotnet'
     if ([string]::IsNullOrWhiteSpace($ExePath)) { $parts.Add('stryker') } else { $exe = $ExePath }
     # config file sits in the test project dir (= cwd), written just before this call
-    $parts.Add('-f "stryker-config.json"')
+    $parts.Add('-f'); $parts.Add('stryker-config.json')
     # WHY --project: a test project referencing several projects makes Stryker's
     # mutation target ambiguous; naming the SUT csproj removes the guesswork.
-    $parts.Add(('--project "{0}"' -f $Run.SutName))
-    foreach ($g in $Globs) { $parts.Add(('-m "{0}"' -f $g)) }
+    $parts.Add('--project'); $parts.Add($Run.SutName)
+    foreach ($g in $Globs) { $parts.Add('-m'); $parts.Add($g) }
     # WHY logical core count: the scoped run is short and owns the machine during
     # this phase (CPU-heavy phases never overlap by design), so Stryker's default
     # of half the cores just doubles the wall clock.
-    $parts.Add(('-c {0}' -f $Cores))
-    $parts.Add('-r "json"')
-    $parts.Add('-r "markdown"')
+    $parts.Add('-c'); $parts.Add([string]$Cores)
+    $parts.Add('-r'); $parts.Add('json')
+    $parts.Add('-r'); $parts.Add('markdown')
     # WHY -O: makes the report path deterministic (<O>/reports/mutation-report.json)
     # instead of Stryker's timestamped default folder.
-    $parts.Add(('-O "{0}"' -f $OutDir))
-    $argLine = ($parts -join ' ')
-    return (Invoke-Native -FilePath $exe -Arguments $argLine `
+    $parts.Add('-O'); $parts.Add($OutDir)
+    return (Invoke-Native -FilePath $exe -Arguments $parts.ToArray() -ArgvSafe `
             -WorkingDirectory $Run.TestProjDirAbs -LogBase $LogBase -TimeoutMs $TimeoutMs)
 }
 
@@ -858,7 +925,7 @@ try {
                 if (-not (Test-Path -LiteralPath $dotConfigDir)) { New-Item -ItemType Directory -Force -Path $dotConfigDir | Out-Null }
                 Copy-Item -LiteralPath $toolsManifestPath -Destination $dotConfigManifestPath -Force
             }
-            $r = Invoke-Native -FilePath 'dotnet' -Arguments 'tool restore' `
+            $r = Invoke-Native -FilePath 'dotnet' -Arguments @('tool', 'restore') -ArgvSafe `
                 -WorkingDirectory $worktreeDir -LogBase "$toolLogBase-restore" -TimeoutMs $timeoutMs
             if ($r.TimedOut -or $r.ExitCode -ne 0) {
                 throw "dotnet tool restore failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
@@ -876,7 +943,7 @@ try {
                 # no bare --version flag (verified live: "Missing value for
                 # option 'version'" and a failed check re-ran the network install
                 # on every run); the tool-path metadata is the offline check.
-                $v = Invoke-Native -FilePath 'dotnet' -Arguments ('tool list --tool-path "{0}"' -f $sharedToolDir) `
+                $v = Invoke-Native -FilePath 'dotnet' -Arguments @('tool', 'list', '--tool-path', $sharedToolDir) -ArgvSafe `
                     -WorkingDirectory $agentQRoot -LogBase "$toolLogBase-version" -TimeoutMs 60000
                 $vText = ''
                 if (Test-Path -LiteralPath $v.OutLog) { $vText = Get-Content -LiteralPath $v.OutLog -Raw }
@@ -886,7 +953,7 @@ try {
                 New-Item -ItemType Directory -Force -Path $sharedToolDir | Out-Null
                 # `tool update` installs when absent and replaces a wrong version.
                 $r = Invoke-Native -FilePath 'dotnet' `
-                    -Arguments ('tool update dotnet-stryker --version {0} --tool-path "{1}"' -f $strykerVersion, $sharedToolDir) `
+                    -Arguments @('tool', 'update', 'dotnet-stryker', '--version', $strykerVersion, '--tool-path', $sharedToolDir) -ArgvSafe `
                     -WorkingDirectory $agentQRoot -LogBase "$toolLogBase-install" -TimeoutMs $timeoutMs
                 if ($r.TimedOut -or $r.ExitCode -ne 0) {
                     throw "dotnet tool update dotnet-stryker $strykerVersion --tool-path $sharedToolDir failed (exit $($r.ExitCode), timedOut=$($r.TimedOut))  -  see $($r.ErrLog)"
@@ -1108,16 +1175,25 @@ try {
         # --incremental: StrykerJS's own supported diff cache (unlike .NET's broken --since).
         # --reporters json,progress is added on top of the spec's command line because the
         # json report is the only machine-readable source for summary.json counts.
-        $strykerArgs = ('stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
         if ($script:IsWin) {
-            # WHY cmd.exe: npx is a .cmd shim on Windows  -  cmd resolves it reliably
-            # under Start-Process (Start-Process can't invoke a shim directly).
+            # WHY cmd.exe + a manually-quoted STRING (not -ArgvSafe): npx is a .cmd
+            # shim on Windows -- cmd resolves it reliably under Start-Process
+            # (Start-Process can't invoke a shim directly), but cmd.exe needs to
+            # receive ONE raw command-line string after /c and reparse it itself.
+            # Verified live (2026-08-25) that routing this through -ArgvSafe
+            # BREAKS it: ArgumentList.Add() applies .NET's own Win32 escaping on
+            # top of this string's already-embedded quotes, double-escaping them
+            # into something cmd.exe misinterprets.
+            $strykerArgs = ('stryker run --mutate "{0}" --incremental --reporters json,progress' -f $mutateList)
             $res = Invoke-Native -FilePath 'cmd.exe' -Arguments "/d /c npx $strykerArgs" `
                 -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
         } else {
             # macOS/Linux: npx is a real executable  -  .NET resolves it via PATH
-            # directly, no shell wrapper needed.
-            $res = Invoke-Native -FilePath 'npx' -Arguments $strykerArgs `
+            # directly, no shell wrapper needed, so this goes -ArgvSafe -- a real
+            # array, no manual quoting, no reliance on how a joined string might
+            # get re-tokenized on this OS.
+            $strykerArgArray = @('stryker', 'run', '--mutate', $mutateList, '--incremental', '--reporters', 'json,progress')
+            $res = Invoke-Native -FilePath 'npx' -Arguments $strykerArgArray -ArgvSafe `
                 -WorkingDirectory $projDirAbs -LogBase $logBase -TimeoutMs $timeoutMs
         }
         if ($res.TimedOut) {

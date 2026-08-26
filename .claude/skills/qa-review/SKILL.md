@@ -13,6 +13,19 @@ All `scripts/*.ps1` are cross-platform PowerShell. In a PowerShell session invok
 them directly; from a bash/zsh shell (macOS/Linux) prefix with `pwsh`, e.g.
 `pwsh scripts/worktree.ps1 -DetectRepo …`.
 
+**Lean reads (standing rule)**: never `Read` a full artifact when a script's own
+stdout summary line already answers the question, or a script exists to answer
+it mechanically — `test-results.json`'s pass/fail counts come from
+`run-tests.ps1`'s own summary line, not a `Read`; `analyst-brief.json`/
+`mutants.json`/etc. for a report or analyst dispatch come from
+`scripts/report-pack.ps1` (below), not a whole-file `Read`. Reserve full `Read`s
+for debugging a specific failure, never normal flow — a heavier orchestrator
+context is more likely to trigger a mid-run compaction (verified live
+2026-08-25: one froze a run for ~3.5 minutes) and every full artifact read is a
+round-trip that isn't free. Concretely, `mutation-report.json` (can run 1MB+)
+should never be `Read` at all; `jira-ticket.json`'s full description is for
+`qa-intake` to read once, not for the orchestrator to re-read later.
+
 ## Inputs
 All inputs are optional and order-independent — provide whichever you know, as plain
 language or as flags (`--branch feature/EC-8876 --ticket EC-8876`), or nothing but a
@@ -50,6 +63,83 @@ intent, then map onto these four slots:
   never a pass), the report header names the mode, and both consent gates are
   skipped as `SKIPPED — quick mode`. Offer the full run as the follow-up.
 
+## Background-agent & background-job watchdog (applies to every dispatch below)
+
+**Why this exists:** on 2026-08-25, `qa-scenario-writer` and `qa-mutation-author`
+were dispatched in the background and both hit a session-level stream stall. With
+no watchdog, the orchestrator's only strategy was "wait for the completion
+notification" — which never came for 52 minutes. This procedure bounds that to a
+few minutes and keeps the developer informed the whole time. Target: **a full run
+never exceeds 10 minutes** (see CLAUDE.md Performance principles).
+
+**Run budget**: at the combined-consent moment (step 2), capture the current time
+(`date +%s` via Bash, or `Get-Date` via PowerShell) as the run's start. Every
+stall decision below checks `remaining = 600s - (now - runStart)`.
+
+**Per-dispatch ceiling** (1.5× the agent's target, floor 3 min — see each step
+below for which applies):
+| Agent | Target | Ceiling |
+|---|---|---|
+| `qa-intake` | 90s (cache hit) | 3 min |
+| `qa-analyst` | 180s | 4.5 min |
+| `qa-scenario-writer` | 180s | 4.5 min |
+| `qa-mutation-author` (either dispatch) | 180s | 4.5 min |
+| `qa-report-synthesizer` | 150s | 4 min |
+| `qa-e2e-author` | n/a — background, off critical path (CLAUDE.md Phase 7b: never blocks the verdict) | 15 min, informational only — not gated by the run budget; a stall here just means its addendum is missing this run, reported as such |
+| background shell job (`stryker-run.ps1`, `worktree.ps1 -EnsureBase`) | the script's own `-TimeoutMinutes`/anti-hang valve | that valve + 1 min |
+
+**Procedure for an agent dispatch** (every `Agent` tool call in this skill except
+`qa-e2e-author`):
+1. Dispatch the agent AND start a paired background timer for its ceiling
+   (`sleep <ceilingSeconds>` via Bash, or `Start-Sleep -Seconds <n>` via
+   PowerShell — either is cross-platform; never a `cmd.exe`-only construct) with
+   `run_in_background: true`, in the **same tool-call batch** as the dispatch.
+   Whichever completes first re-invokes you.
+2. **Agent's own completion notification arrives first** → sanity-check it
+   before accepting it as done: does its result actually match what it was
+   asked for (the expected workspace artifact exists / the response isn't a
+   vague "I'll wait for X" placeholder)? Verified live 2026-08-25: a dispatched
+   agent can report **completed** to the harness while it had spawned its own
+   untracked background work and returned an incomplete placeholder answer — a
+   **false completion**, distinct from a silent stall, that a bare "wait for
+   the notification" check does not catch. If the result looks genuinely done →
+   normal flow, the timer later firing is a no-op. If it looks incomplete →
+   treat it exactly like a stalled dispatch from step 3b onward (`SendMessage` a
+   nudge to resume it — confirmed live: a nudged agent correctly picked back up
+   and finished with the right answer once told to actually wait for its own
+   background work).
+3. **Timer fires first** → the agent is running long or has stalled:
+   a. Stream one status line immediately ("`<agent>` is past its expected time
+      (ceiling `<n>`s) — checking on it"). Never go dark.
+   b. `ListAgents` to confirm it's still listed, then `SendMessage` a short nudge
+      ("status check — please report progress or continue") and start a second,
+      short **20s grace timer** the same way — tightened from an initial 45s
+      after live testing (2026-08-25) showed a nudged, genuinely-alive agent
+      engages essentially immediately; 45s was untested caution with no
+      justification once real data existed, and every second of it is dead
+      weight against the 10-min target on a true stall.
+   c. Grace timer fires with still no response → the dispatch is stalled. Check
+      the run budget: if `remaining >= ceiling + 20s + 15s buffer`, re-dispatch a
+      **fresh** `Agent` call (new instance, not a resume of the stalled one — same
+      original inputs; all six agents are idempotent over their workspace inputs)
+      paired with its own new watchdog timer at the same ceiling. If the budget
+      does not allow it, or this is already a retry, stop: don't retry a third
+      time regardless of budget.
+   d. Any stall/retry gets an honest `time-ledger.json` row with the REAL elapsed
+      seconds (never 0, never "not comparable" — see the corrected-ledger rule),
+      labeled `DEGRADED — agent stalled, lane skipped (run-budget)` if given up,
+      or noting the retry if one happened and then succeeded. The report/evidence
+      file must reflect a given-up lane as degraded, never silently missing it.
+
+**Procedure for a background shell job** (`stryker-run.ps1` in step 5,
+`worktree.ps1 -EnsureBase` in step 7): same paired-timer start, but there's no
+`SendMessage` target — on the timer firing first, stream the status line, then
+check the job's actual state (its own log/output files, or `TaskOutput` if the
+harness exposes it for that background task) rather than nudging: growing
+output → extend once with a timer at half the original ceiling; no progress /
+process gone → `DEGRADED` row with real elapsed time, run continues without that
+phase's result (e.g., mutation results marked not completed this run).
+
 ## Run loop
 
 1. **Preflight** — read `.claude/qa-agent-config.jsonc` (missing → tell the user to
@@ -68,16 +158,19 @@ intent, then map onto these four slots:
    the developer which repo/branch (/worktree, if it's not the registered path) was
    resolved. Zero → say what was checked and ask. Multiple → list each
    `repoSlug`/`branch`/`repoPath` and ask which one.
-   Then run `scripts/worktree.ps1 -Heal -RepoPath <path>` then
+   Then issue `-Heal` → `-EnsureWorkspace` → `-DiffSet` as **ONE chained
+   command** (`;`-chained pwsh invocations, or three PowerShell statements in one
+   call) — each consumes the previous one's FILE output, not its stdout, so
+   there is no judgment gate between them and no reason to spend three
+   round-trips: `scripts/worktree.ps1 -Heal -RepoPath <path>` then
    `-EnsureWorkspace -RepoSlug <candidate's repoSlug> -Branch <candidate's branch>
    -RepoPath <candidate's repoPath> [-TicketKey <KEY, if known>]` — all three of
    `-RepoSlug`/`-Branch`/`-RepoPath` are required (the script throws otherwise);
    take them verbatim from the resolved candidate above, not the registered
    config path, since a `git worktree add` sibling's `repoPath` differs from it —
    to create `workspace/<repo>/<branch>/` and write `run-manifest.json` (pin the
-   base SHA once — never re-resolve). In the SAME batch, also run
-   `scripts/worktree.ps1 -DiffSet -Manifest <path>` — pure git, no reason to
-   make `qa-intake` wait to derive it itself. This is what lets
+   base SHA once — never re-resolve), then `-DiffSet -Manifest <path>` — pure
+   git, no reason to make `qa-intake` wait to derive it itself. This is what lets
    `scripts/adapter-cache.ps1 -Probe` (step 2, task 3) run immediately when
    `qa-intake` starts instead of after its own diff-set derivation; `qa-intake`'s
    own task 1 guard ("if `diff-set.json` doesn't exist yet") already no-ops
@@ -85,7 +178,9 @@ intent, then map onto these four slots:
    Probe SDK/node/docker. First run on a repo → offer the one-time setup
    (Stryker tool restore, oasdiff download) as a consented step; declining just
    narrows lanes.
-2. **Intake** — delegate to `qa-intake` with the manifest path. It writes
+2. **Intake** — delegate to `qa-intake` with the manifest path, applying the
+   watchdog procedure above (ceiling 3 min; pre-consent, so a stall here retries
+   once unconditionally — the run budget hasn't started yet, see below). It writes
    `diff-set.json` + `adapter-profiles.json` + `jira-ticket.json` (the last via
    `scripts/jira.ps1` — direct REST, no Jira MCP; ALWAYS written when a ticket
    key exists, with an honest `SKIPPED — Jira not configured…` / `DEGRADED — …`
@@ -104,7 +199,10 @@ intent, then map onto these four slots:
    from diff-set.json; ApiGateway → `-Mode ocelot-diff`) — pure git + oasdiff,
    no consent needed, and the risk score gets its contract signal on the first
    computation. The boot-capture path (payroll-poc) and Pact stay in step 7.
-   **💬 Combined consent (immediately after intake, one message)**: ask BOTH
+   **💬 Combined consent (immediately after intake, one message)**: capture the
+   run-start timestamp now (`date +%s` / `Get-Date`) — this anchors the
+   10-minute run-wide budget the watchdog procedure above checks for every
+   dispatch from here on. Ask BOTH
    gates now per their toggles — mutation (scope, calibrated mutant/time
    estimate; your nothing-worth-mutating auto-skip judgment still applies first)
    and execution (disclose intake's outbound destinations verbatim). Remember
@@ -176,15 +274,29 @@ intent, then map onto these four slots:
    (only if the scenario cache is stale for this diff/AC hash) together with step
    3's script call, in the same message — real overlap, not just the two agents
    together: the scripts finish in under two minutes, the agents run for several, so
-   by the time either needs a script artifact it already exists. ALSO include
+   by the time either needs a script artifact it already exists. Apply the
+   watchdog procedure to EACH agent dispatched here independently — each gets its
+   own paired timer (ceiling 4.5 min) and its own stall/retry/degrade decision;
+   one agent stalling must never block or delay the others. ALSO include
    `scripts/test-inventory.ps1 -Manifest <path>` in this same batch (mechanical,
    <1s — a regex scan, not a build) — its output, `test-inventory.json`, is what
    lets `qa-scenario-writer` judge per-AC coverage from existing test METHOD names
    before opening any whole file. When the mutation consent from step 2 resolved
    yes, ALSO include `scripts/worktree.ps1 -Ensure` (checkout is I/O — it doesn't
-   contend with the test run) and dispatch `qa-mutation-author` in the same batch:
+   contend with the test run) and dispatch `qa-mutation-author` in the same batch
+   (its own paired watchdog timer, ceiling 4.5 min, same as the other two):
    design + injection overlap step 3 freely; only the semantic-mutant DRIVER waits
    for step 3 to finish (CPU-heavy phases never overlap).
+   - `scripts/report-pack.ps1 -Manifest <path> -For analyst` (mechanical,
+     included in this same batch) assembles the diff-hunks-and-adapter-profile
+     half of the inline pack below — real `git diff` text per changed/untracked
+     file plus the adapter-profile one-line summary — so the orchestrator's
+     part of building the pack shrinks to pasting its output plus the AC text
+     and intake's citations (genuine judgment from step 2's brief, not
+     something a script can derive — see `scripts/CONTRACTS.md`'s
+     `report-pack.ps1 output` section for why). `qa-scenario-writer` and
+     `qa-mutation-author` below reuse the SAME assembled pack as `qa-analyst`
+     — one script run, three dispatch prompts, not three hand-built packs.
    - `qa-scenario-writer`'s dispatch prompt carries the SAME inline evidence pack
      as `qa-analyst` (AC text verbatim, diff hunks in full, intake's citations,
      adapter-profile summary, workspace dir path) — never a re-read of
@@ -207,13 +319,12 @@ intent, then map onto these four slots:
    - `qa-analyst`'s dispatch prompt MUST carry an inline evidence pack, not just a
      workspace-dir path — this is what keeps it inside its ~15-tool-call budget
      (verified live: without this it took 437s, the single largest phase, largely
-     re-reading things the orchestrator already had in-conversation). Build the
-     pack from what you already hold at this point in the run: the AC text
-     verbatim (from step 2's intake brief), the diff hunks in full (from
-     `diff-set.json` — small and pre-scoped, paste them, don't point at the file),
-     intake's already-cited file:line evidence, an adapter-profile one-line
-     summary (framework/runner/dialect), and the workspace dir's absolute path.
-     `qa-analyst` still reads `diff-coverage.json`/`test-results.json` itself
+     re-reading things the orchestrator already had in-conversation). The pack is
+     `report-pack.ps1 -For analyst`'s output (diff hunks, adapter-profile
+     summary, workspace path — mechanical) plus the AC text verbatim and
+     intake's already-cited file:line evidence (from step 2's intake brief —
+     genuine judgment, not something the script derives). `qa-analyst` still
+     reads `diff-coverage.json`/`test-results.json` itself
      (only for its Gap Lattice and flaky sections — it's briefed to do its other
      sections first and treat those two files as "not ready yet," not an error,
      if missing when it starts) plus `mutation-report.json`/`impact-index.json`/
@@ -248,15 +359,20 @@ intent, then map onto these four slots:
    Stryker's own multi-minute run instead of running serially after it (this
    was ad hoc the first time it happened; it's the rule now, since suggestedFix
    drafting is model/file work with nothing to wait on once the driver's
-   results exist). Then **`scripts/worktree.ps1 -Ensure` again** (cheap reuse
+   results exist). Apply the watchdog to this dispatch too (ceiling 4.5 min,
+   same agent). Then **`scripts/worktree.ps1 -Ensure` again** (cheap reuse
    reset — removes the AGENTQ_MUTANT switches; generated tests re-materialize
    from staging; stryker-run refuses to start while switches remain) →
    `scripts/stryker-run.ps1` (**must be a background shell job, not a
    foreground command** — this phase is legitimately multi-minute; a short
    foreground timeout sends SIGTERM before the script's own anti-hang valve
    fires, yielding no mutation results and potentially orphaning
-   `.dll.stryker-unchanged` backups) → `scripts/merge-mutation-reports.ps1`.
-   Stream survivors as they land.
+   `.dll.stryker-unchanged` backups; apply the background-shell-job watchdog,
+   ceiling = its `-TimeoutMinutes` + 1 min) → `scripts/merge-mutation-reports.ps1`
+   → `scripts/risk-score.ps1` (step 6, below) **as ONE chained command** — the
+   two scripts have a strict sequential data dependency (risk-score reads
+   merge's output file) with zero judgment in between, so there is no reason
+   to spend two round-trips on it. Stream survivors as they land.
 6. **Risk score** — `scripts/risk-score.ps1` (the contract signal already exists
    from step 2 on committed-spec/ocelot repos — no recompute needed later).
 7. **Execution** (consent already answered in step 2, per
@@ -268,36 +384,48 @@ intent, then map onto these four slots:
    2's `test-results.json`), then anti-vacuity AFTER mutation is done via
    `scripts/worktree.ps1 -EnsureBase` + `scripts/run-tests.ps1 -GeneratedOnly
    -WorktreeRoot <worktreeBaseDir> -ResultsLabel base` (**`-EnsureBase` can be
-   multi-minute on a cold first run — background it like `stryker-run.ps1`**) —
-   never flip the main worktree. Boot-capture contract lane (payroll-poc) + Pact run here too.
+   multi-minute on a cold first run — background it like `stryker-run.ps1`**,
+   with the same background-shell-job watchdog — no internal valve of its own
+   today, so use a fixed 10-min ceiling) — never flip the main worktree.
+   Boot-capture contract lane (payroll-poc) + Pact run here too.
    Frontend branches: run cached E2E specs
    (`npx playwright test --grep @agentq`); kick off `qa-e2e-author` in the
-   background for new scenarios and (if a Figma link exists) design conformance.
+   background for new scenarios and (if a Figma link exists) design conformance
+   — apply the watchdog for visibility (ceiling 15 min) but NOT the run-budget
+   gate: it never blocks the report (CLAUDE.md Phase 7b), so a stall here is
+   just noted and its addendum arrives next run.
 8. **Report — two writers, in order** (fixes both the duplicated Run
    summary/Time ledger tables and the report phase's own time being
    unmeasurable that this used to produce):
-   1. Dispatch `qa-report-synthesizer` — give it `analyst-brief.json`'s path
-      plus, INLINE in the prompt (it never reads these artifacts itself): the
-      🧭 one-sentence branch summary, ≤3 manual-test-candidate titles (if any),
-      any failed test's name + `rerunCommand` (from `test-results.json`'s
-      `flaky.mightBeFlaky`, which you already saw in step 3's own summary
-      line), and the keep-list — one plain one-liner per generated
-      test/mutation-suggestedFix, in the fixed order Unit → Mutation →
-      Component → API → E2E (you already have these from steps 4/5's agent
-      results). It writes the main report + `report-selection.json` (which
-      ≤3 finding/question ids it used, by `analyst-brief.json`'s own ids).
-      Time this dispatch.
+   0. Run `scripts/report-pack.ps1 -Manifest <path> -For report` — mechanical
+      assembly of everything `qa-report-synthesizer` needs from
+      `analyst-brief.json`/`risk-score.json`/`jira-ticket.json`/`mutants.json`/
+      `stryker/summary.json`/`test-results.json`/scenario files (shape in
+      `scripts/CONTRACTS.md`). This replaces hand-composing the pack — verified
+      live (2026-08-25) that doing it by hand was one of the longest single
+      orchestrator turns in a run.
+   1. Dispatch `qa-report-synthesizer` — paste step 0's output verbatim into the
+      prompt, plus the handful of things ONLY the orchestrator knows and no
+      script can derive: the 🧭 one-sentence branch summary (plain-language,
+      what the code does) and anything else that happened mid-run worth
+      mentioning (a consent denial, an infra hiccup). It writes the main report
+      + `report-selection.json` (which ≤3 finding/question ids it used, by
+      `analyst-brief.json`'s own ids). Time this dispatch and apply the
+      watchdog (ceiling 4 min).
    2. Append `{ name: "report", actor: "qa-report-synthesizer", seconds:
-      <measured>, outcome: "RAN" }` to `time-ledger.json` and update
-      `totalSeconds` — this is the one phase that used to be unmeasurable
-      because it lived only inside the file it was writing.
-   3. Run `scripts/render-evidence.ps1 -Manifest <path> -ReportPath <the main
-      report path>` — deterministic, zero model calls, produces the
-      `-evidence.md` companion straight from the workspace artifacts +
-      `analyst-brief.json` + `report-selection.json` (which now includes the
-      report phase's real seconds, since step 2 ran first).
+      <measured>, outcome: "RAN" }` to `time-ledger.json`, update
+      `totalSeconds`, then run `scripts/render-evidence.ps1 -Manifest <path>
+      -ReportPath <the main report path>` **as ONE chained command** — the
+      ledger append is a small in-place edit and render-evidence immediately
+      reads that same file back; there is no judgment step between them worth
+      a separate round-trip. `render-evidence.ps1` is deterministic, zero
+      model calls, and produces the `-evidence.md` companion straight from the
+      workspace artifacts + `analyst-brief.json` + `report-selection.json`
+      (which now includes the report phase's real seconds, since the ledger
+      append happened first in the same chain).
    Re-save BOTH files as UTF-8 with BOM (PowerShell `[IO.File]::WriteAllText`
-   with `UTF8Encoding($true)`). **Do NOT restate the verdict or findings in
+   with `UTF8Encoding($true)`) — chain this onto step 2's command too, same
+   reasoning. **Do NOT restate the verdict or findings in
    chat** — the closing message is a clickable link to the main report file
    and nothing of its content (the report is the single source of the
    verdict; a chat copy drifts). Then ask which generated tests to keep; on
