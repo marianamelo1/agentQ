@@ -464,7 +464,7 @@ try {
                 if ($reason -match '(\d+)\s+changed\s+lines?') { $covers = [int]$Matches[1] }
                 $testsOut.Add([ordered]@{ fqn = [string](Get-Prop $tt 'fqn' ''); coversChangedLines = $covers })
             }
-            $reverseCoverage = [ordered]@{ available = $true; reason = $null; tests = @($testsOut) }
+            $reverseCoverage = [ordered]@{ available = $true; reason = $null; tests = $testsOut.ToArray() }
         }
     }
 
