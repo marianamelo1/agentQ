@@ -240,7 +240,29 @@ flakiness rather than agentQ's own work.
   skips that mechanism's instrumentation up front on later runs (DEGRADED row,
   `-ForceCoverage` re-probes) — and a completed coverage-wrapped run is NEVER
   re-run just because its coverage came back empty (the TRX results are real;
-  only a timed-out wrapped run re-runs plainly). Specifically for
+  only a timed-out wrapped run re-runs plainly). A `false` verdict is never
+  trusted forever, either: it self-expires after 1 day (`coverage.probedAt`),
+  auto re-probing on the next run exactly as `-ForceCoverage` would, then
+  re-recording whatever it finds with a fresh `probedAt` — bounds how long one
+  bad observation can gate every run (self-heals by the next day, not padded
+  to an arbitrary multi-day guess), without paying the instrumentation cost
+  every run either (a repo is typically reviewed several times in one day).
+  This is insurance against a future unknown cause, not a fix for the one
+  already found: investigating GH issue #24 (`collectorWorks=false` recorded
+  2026-08-25 on payroll-poc, plain `dotnet test --collect:XPlat Code
+  Coverage`) traced it to a real bug, not a machine gap or a flake — `Set-
+  SpecCommand`'s `collector`-mechanism branch appended `--collect:...` AFTER
+  the command's trailing `-- RunConfiguration...` marker; `dotnet test`
+  treats everything past `--` as RunSettings `key=value` overrides, so the
+  malformed token was silently dropped every single run (exit 0, tests green,
+  zero coverage, 100% reproducible, independent of concurrency or how the
+  process was launched — both were chased and ruled out first). Fixed by
+  moving the `--collect` flag before the `--` marker (verified live: the same
+  branch now produces real class data on every run). Separately, a coverage
+  tool that could not even START this run (not on PATH) is never recorded as
+  a capability verdict at all — that is an environment/setup problem, not
+  evidence the mechanism itself is broken, the same carve-out already applied
+  to a failed on-demand `coverlet.console` install below. Specifically for
   `dotnet-coverage` (documented gap: its native profiler never attaches on
   osx-arm64, so class data would otherwise be empty on EVERY run there, not just
   the first): once calibrated broken, `run-tests.ps1` escalates to

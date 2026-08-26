@@ -614,6 +614,26 @@ function Set-SpecCommand {
     param($Spec, [int]$AssignedCores, [bool]$AsPlain = $false)
     $ta = @($Spec.ProjAbs, '--no-build', '--no-restore', '--logger', "trx;LogFileName=$($Spec.TrxName)", '--results-directory', $Spec.TrxDir)
     if ($Spec.Filter) { $ta += @('--filter', $Spec.Filter) }
+    # WHY --collect must be appended to $ta HERE, before the `--` RunSettings
+    # marker below, never after it: verified live (GH issue #24) -- `dotnet test`
+    # syntax is `dotnet test [options] -- [RunSettings key=value pairs]`;
+    # everything after `--` is a runsettings override, not a CLI flag. The
+    # previous code appended `--collect:XPlat Code Coverage;...` AFTER `$ta` had
+    # already gained its trailing `-- RunConfiguration...` suffix, so the collect
+    # flag landed past the `--` marker and was silently swallowed as a bogus
+    # (non key=value) runsettings token -- dotnet test still exited 0 and the
+    # tests still ran and passed, but NO coverage was EVER actually collected.
+    # This is what calibration.json's `collectorWorks=false` was really
+    # recording: not a machine/profiler capability gap, a 100%-reproducible
+    # argument-ordering bug, independent of concurrency or how the process was
+    # launched (both were red herrings chased before this was found). Scoped to
+    # the 'collector' mechanism only (its own CLI flag) -- dotnet-coverage and
+    # coverlet-console below wrap the WHOLE command as an external tool's own
+    # inner-process argument and were never affected by this ordering.
+    if ($Spec.WantCoverage -and -not $AsPlain -and
+        $Spec.Mechanism -ne 'dotnet-coverage' -and $Spec.Mechanism -ne 'coverlet-console') {
+        $ta += @('--collect:XPlat Code Coverage;Format=cobertura;SingleHit=true')
+    }
     # WHY TreatNoTestsAsError=true unconditionally: verified  -  VSTest exits 0
     # on a filter matching zero tests, which would otherwise read as a pass.
     $ta += @('--', "RunConfiguration.MaxCpuCount=$AssignedCores", 'RunConfiguration.TreatNoTestsAsError=true')
@@ -641,7 +661,7 @@ function Set-SpecCommand {
         }
         else {
             $Spec.Exe = 'dotnet'
-            $Spec.Args = @('test') + $ta + @('--collect:XPlat Code Coverage;Format=cobertura;SingleHit=true')
+            $Spec.Args = @('test') + $ta
         }
     }
     else {
@@ -790,8 +810,39 @@ try {
     # up front instead of paying the instrumentation cost for nothing.
     $calibPathShared = Join-Path (Split-Path -Parent $workspaceDir) 'calibration.json'
     $calibCoverage = $null
+    # A "broken" verdict is recorded from a SINGLE completed run (see the
+    # covSeenEmpty persist logic below) and, once false, skips instrumentation
+    # forever -- no run ever gets a second look at it without a developer
+    # remembering `-ForceCoverage`. Investigating GH issue #24 (a
+    # `collectorWorks=false` recorded 2026-08-25) found the actual cause was a
+    # genuine, 100%-reproducible bug in Set-SpecCommand below (the `--collect`
+    # flag was landing AFTER the `--` RunSettings marker and being silently
+    # dropped every run) -- now fixed there. This self-heal is insurance against
+    # a DIFFERENT, still-unknown future cause, not a fix for that one: once a
+    # verdict is a day old, treat it the same as `-ForceCoverage` for THIS run
+    # only -- tightest window that still amortizes the instrumentation cost (one
+    # re-probe per repo per day, not per run; a branch under active review is
+    # typically reviewed several times in one day) while self-correcting
+    # whatever the next bad observation turns out to be by the very next day,
+    # instead of padding the gate with an arbitrary multi-day guess or trusting
+    # a single observation forever with no automatic way back. A genuine,
+    # persistent gap (e.g. the documented dotnet-coverage osx-arm64
+    # profiler-attach gap) just gets re-recorded `false` with a fresh `probedAt`
+    # and stays skipped for another day -- this never removes the fast-path,
+    # only bounds how long a single bad observation can go unchecked.
+    $calibCoverageStale = $false
     if (Test-Path -LiteralPath $calibPathShared) {
         $calibCoverage = Get-Prop (Read-JsonFile -Path $calibPathShared) 'coverage' $null
+        if ($null -ne $calibCoverage) {
+            $probedAtRaw = [string](Get-Prop $calibCoverage 'probedAt' '')
+            $probedAtDate = [DateTime]::MinValue
+            if ($probedAtRaw -and [DateTime]::TryParse(
+                    $probedAtRaw, [Globalization.CultureInfo]::InvariantCulture,
+                    ([Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal),
+                    [ref]$probedAtDate)) {
+                $calibCoverageStale = (((Get-Date).ToUniversalTime()) - $probedAtDate.ToUniversalTime()).TotalDays -ge 1
+            }
+        }
     }
 
     # Pre-emptive background kickoff: if ANY .NET profile will need the
@@ -804,7 +855,7 @@ try {
     # synchronous install if this didn't fire in time (or at all).
     $script:coverletInstallProc = $null
     $script:coverletInstallTimedOut = $false
-    if ($null -ne $calibCoverage -and
+    if ($null -ne $calibCoverage -and -not $calibCoverageStale -and
         (Get-Prop $calibCoverage 'dotnetCoverageWorks' $null) -eq $false -and
         (Get-Prop $calibCoverage 'coverletConsoleWorks' $null) -ne $false -and
         (-not (Get-Command coverlet -ErrorAction SilentlyContinue))) {
@@ -962,11 +1013,19 @@ try {
             $capKey = 'collectorWorks'
             if ($mechanism -eq 'dotnet-coverage') { $capKey = 'dotnetCoverageWorks' }
             $binDirForFallback = $null
+            # A verdict at least a day old gets one free re-probe this run instead
+            # of being trusted forever (see $calibCoverageStale above) -- note it now,
+            # before $capKey can be reassigned by the dotnet-coverage fallback below,
+            # so a success on THIS project can say plainly that it was a stale-verdict
+            # re-probe, not just "worked" with no context for why it ran at all.
+            $staleReprobe = ($calibCoverageStale -and $null -ne $calibCoverage -and
+                (Get-Prop $calibCoverage $capKey $null) -eq $false)
             # Capability gate: a mechanism a prior run proved broken on this machine
             # (profiler never attaches, no class data ever) is skipped up front  -
             # the instrumentation costs real time (documented 4x-47x blowups) and
-            # produces nothing diff-coverage can parse. -ForceCoverage re-probes.
-            if ($wantCoverage -and -not $ForceCoverage -and $null -ne $calibCoverage -and
+            # produces nothing diff-coverage can parse. -ForceCoverage re-probes,
+            # and so does a calibration verdict old enough to be $calibCoverageStale.
+            if ($wantCoverage -and -not $ForceCoverage -and -not $calibCoverageStale -and $null -ne $calibCoverage -and
                 (Get-Prop $calibCoverage $capKey $null) -eq $false) {
                 # dotnet-coverage has a documented gap on some machines (osx-arm64:
                 # its native profiler never attaches, so class data is always empty,
@@ -1010,6 +1069,7 @@ try {
                 WantCoverage = $wantCoverage; Mechanism = $mechanism; CapKey = $capKey
                 BinDir = $binDirForFallback
                 CoverageDegraded = $coverageDegraded; CoverageNote = $coverageNote
+                StaleReprobe = $staleReprobe
                 TrxDir = $specTrxDir; TrxName = $trxName; TrxPath = $trxPath
                 CovOut = (Join-Path $covDir "$projKey.cobertura.xml")
                 TimeoutSec = $dotnetTimeoutSec
@@ -1194,8 +1254,20 @@ try {
             $res = $spec.Result
             if ($res.StartFailed) {
                 $spec.CoverageDegraded = $true
-                $spec.CoverageNote = "coverage tool for mechanism '$($spec.Mechanism)' could not start (not installed on this machine)  -  ran without coverage; recorded in calibration"
-                $covSeenEmpty[$spec.CapKey] = $true
+                # WHY this does NOT set covSeenEmpty (and so is never persisted as a
+                # capability verdict): the process couldn't even launch -- the tool
+                # isn't on PATH in this process, not "the profiler ran and attached
+                # to nothing". That's an environment/setup problem (fixable by
+                # installing the tool, or by a shell with the right PATH), not
+                # evidence the mechanism is broken on this machine -- the exact same
+                # carve-out CONTRACTS.md already documents for a failed
+                # coverlet.console on-demand install ("does NOT set
+                # coverletConsoleWorks: false ... retried next run"). Applying it
+                # here too instead of collapsing into the "produced no class data"
+                # verdict avoids locking coverage off machine-wide from a launch
+                # failure that a later run (once the tool is actually resolvable)
+                # would silently fix on its own.
+                $spec.CoverageNote = "coverage tool for mechanism '$($spec.Mechanism)' could not start (not installed / not resolvable on PATH in this process)  -  ran without coverage this run; NOT recorded as a calibration verdict, retried next run"
             }
             elseif ($res.TimedOut) {
                 $spec.CoverageDegraded = $true
@@ -1258,6 +1330,14 @@ try {
                 if ($null -ne $covXml) { $covHasData = [bool](Select-String -LiteralPath $covXml -Pattern '<class' -Quiet) }
                 if ($covHasData) {
                     $covSeenData[$spec.CapKey] = $true
+                    if ($spec.StaleReprobe) {
+                        # This project ran ONLY because its calibration verdict was
+                        # a day+ old (see $calibCoverageStale) -- say so plainly
+                        # rather than a silent "coverage worked", so a developer
+                        # reading this run can tell the calibration self-corrected
+                        # instead of assuming the machine was always fine.
+                        $spec.CoverageNote = "coverage: calibration.coverage.$($spec.CapKey) was recorded false but the verdict was 1+ day old -- auto re-probed this run and it produced real class data; calibration corrected to true"
+                    }
                 }
                 else {
                     $spec.CoverageDegraded = $true
