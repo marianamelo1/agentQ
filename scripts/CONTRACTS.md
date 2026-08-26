@@ -354,6 +354,38 @@ profiler). A `false` key makes later runs skip that mechanism's instrumentation 
 front, reporting the coverage row DEGRADED with the reason; `-ForceCoverage`
 re-probes after a machine-level fix.
 
+A `false` verdict is also never trusted forever, even without `-ForceCoverage`:
+`probedAt` older than 1 day makes the NEXT run re-probe automatically (same
+effect as `-ForceCoverage`, no flag needed), then re-record whatever it finds with
+a fresh `probedAt`. A single bad observation would otherwise skip coverage
+forever with no automatic way back — this is insurance against a future unknown
+cause, not the fix for a known one: investigating GH issue #24 (a
+`collectorWorks=false` recorded 2026-08-25 for payroll-poc's `collector`
+mechanism, plain `dotnet test --collect:XPlat Code Coverage`, not the documented
+`dotnet-coverage` osx-arm64 gap) found it was neither a machine gap nor a
+transient flake — it was 100% reproducible, and a genuine bug: `Set-SpecCommand`
+appended `--collect:...` AFTER the command's trailing `-- RunConfiguration...`
+marker, and `dotnet test` treats everything past `--` as RunSettings `key=value`
+overrides, so the malformed token was silently dropped on every run (exit 0,
+tests green, zero coverage). That's now fixed (the flag is ordered before `--`),
+verified live to produce real class data again. The 1-day self-heal window stays
+in place regardless, as a bound on how long any future unexplained `false` can
+gate every run without a human noticing: a genuine, reproducible gap just gets
+re-recorded `false` with a refreshed `probedAt` and stays skipped for another day,
+so the instrumentation cost still isn't paid every run (a branch under active
+review is typically reviewed several times in one day — the amortization holds
+within a day, not just across days). When a stale-triggered re-probe succeeds,
+that project's `coverageNote` says so explicitly ("verdict was 1+ day old -- auto
+re-probed ... calibration corrected to true") instead of reading like an ordinary
+silent pass.
+
+Separately: a coverage tool process that could not even **start** this run (not
+installed / not resolvable on PATH in this process) never sets its capability key
+at all — that's an environment/setup problem, not evidence the profiler itself
+doesn't attach, the same carve-out already applied below to a failed
+`coverlet.console` on-demand install. It degrades this run's `coverageNote`
+honestly and is retried plainly next run, never persisted as `false`.
+
 `coverletConsoleWorks` is different from the other two: it is never a project's
 OWN declared mechanism (`coverageMechanism` has no `"coverlet-console"` value —
 see the note above), only a fallback `run-tests.ps1` reaches for once

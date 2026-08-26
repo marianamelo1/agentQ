@@ -464,7 +464,10 @@ try {
                 if ($reason -match '(\d+)\s+changed\s+lines?') { $covers = [int]$Matches[1] }
                 $testsOut.Add([ordered]@{ fqn = [string](Get-Prop $tt 'fqn' ''); coversChangedLines = $covers })
             }
-            $reverseCoverage = [ordered]@{ available = $true; reason = $null; tests = @($testsOut) }
+            # WHY .ToArray(), not @(...): on this PS build `@(<List[object]>)` throws
+            # "Argument types do not match" (same empirically-confirmed quirk
+            # documented in run-tests.ps1/worktree.ps1) -- .ToArray() is safe.
+            $reverseCoverage = [ordered]@{ available = $true; reason = $null; tests = $testsOut.ToArray() }
         }
     }
 
