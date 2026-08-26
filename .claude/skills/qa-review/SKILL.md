@@ -84,7 +84,6 @@ below for which applies):
 | `qa-analyst` | 180s | 4.5 min |
 | `qa-scenario-writer` | 180s | 4.5 min |
 | `qa-mutation-author` (either dispatch) | 180s | 4.5 min |
-| `qa-report-synthesizer` | 150s | 4 min |
 | `qa-e2e-author` | n/a — background, off critical path (CLAUDE.md Phase 7b: never blocks the verdict) | 15 min, informational only — not gated by the run budget; a stall here just means its addendum is missing this run, reported as such |
 | background shell job (`stryker-run.ps1`, `worktree.ps1 -EnsureBase`) | the script's own `-TimeoutMinutes`/anti-hang valve | that valve + 1 min |
 
@@ -317,20 +316,22 @@ phase's result (e.g., mutation results marked not completed this run).
      mechanics (matching an existing pattern it must reproduce exactly), never
      for general context the pack already gives it.
    - `qa-analyst`'s dispatch prompt MUST carry an inline evidence pack, not just a
-     workspace-dir path — this is what keeps it inside its ~15-tool-call budget
+     workspace-dir path — this is what keeps it inside its ~10-tool-call budget
      (verified live: without this it took 437s, the single largest phase, largely
      re-reading things the orchestrator already had in-conversation). The pack is
      `report-pack.ps1 -For analyst`'s output (diff hunks, adapter-profile
-     summary, workspace path — mechanical) plus the AC text verbatim and
+     summary, impact/testomat/manual-candidate summaries, workspace path —
+     mechanical) plus the AC text verbatim and
      intake's already-cited file:line evidence (from step 2's intake brief —
      genuine judgment, not something the script derives). `qa-analyst` still
      reads `diff-coverage.json`/`test-results.json` itself
      (only for its Gap Lattice and flaky sections — it's briefed to do its other
      sections first and treat those two files as "not ready yet," not an error,
-     if missing when it starts) plus `mutation-report.json`/`impact-index.json`/
-     `testomat-candidates.json`/`manual-test-candidates.json` when present —
+     if missing when it starts) plus `mutation-report.json` when present —
      everything else (`run-manifest.json`, `diff-set.json`, `adapter-profiles.json`,
-     `jira-ticket.json`) comes from the inline pack, never a disk re-read. Its
+     `jira-ticket.json`, `impact-index.json`, `testomat-candidates.json`,
+     `manual-test-candidates.json`) comes from the inline pack, never a disk
+     re-read. Its
      output is a file, `<workspaceDir>/analyst-brief.json` (shape in
      `scripts/CONTRACTS.md`), not chat prose — its final message is a one-line
      count summary only. It does NOT interpret `contract-report.json` or rank a
@@ -344,10 +345,11 @@ phase's result (e.g., mutation results marked not completed this run).
      particular takes intake's citations as verified by default — it spends a
      read re-confirming one only when a specific finding depends on that exact
      citation being accurate, never as a blanket double-check.
-   - If step 2b ran, add `impact-index.json` + `testomat-candidates.json` to
-     `qa-analyst`'s read list too — cross-repo fan-in is part of its
-     regression-risk brief. If step 2c ran, also add `manual-test-candidates.json`
-     — manual-test interpretation is part of the same brief.
+   - The impact/manual lanes reach `qa-analyst` through the pack (built by
+     `report-pack.ps1 -For analyst` AFTER steps 2b/2c have written their
+     artifacts — build it in this step's batch, never earlier) — cross-repo
+     fan-in and manual-test interpretation are part of its regression-risk
+     brief, from the pack, not disk reads.
 5. **Mutation** (consent already answered in step 2; the auto-skip judgment and a
    `SKIPPED — consent denied` line still apply; skipped under `--quick`) — after
    step 3 has finished (the driver and Stryker are CPU-heavy): design + injection
@@ -394,38 +396,30 @@ phase's result (e.g., mutation results marked not completed this run).
    — apply the watchdog for visibility (ceiling 15 min) but NOT the run-budget
    gate: it never blocks the report (CLAUDE.md Phase 7b), so a stall here is
    just noted and its addendum arrives next run.
-8. **Report — two writers, in order** (fixes both the duplicated Run
-   summary/Time ledger tables and the report phase's own time being
-   unmeasurable that this used to produce):
-   0. Run `scripts/report-pack.ps1 -Manifest <path> -For report` — mechanical
-      assembly of everything `qa-report-synthesizer` needs from
-      `analyst-brief.json`/`risk-score.json`/`jira-ticket.json`/`mutants.json`/
-      `stryker/summary.json`/`test-results.json`/scenario files (shape in
-      `scripts/CONTRACTS.md`). This replaces hand-composing the pack — verified
-      live (2026-08-25) that doing it by hand was one of the longest single
-      orchestrator turns in a run.
-   1. Dispatch `qa-report-synthesizer` — paste step 0's output verbatim into the
-      prompt, plus the handful of things ONLY the orchestrator knows and no
-      script can derive: the 🧭 one-sentence branch summary (plain-language,
-      what the code does) and anything else that happened mid-run worth
-      mentioning (a consent denial, an infra hiccup). It writes the main report
-      + `report-selection.json` (which ≤3 finding/question ids it used, by
-      `analyst-brief.json`'s own ids). Time this dispatch and apply the
-      watchdog (ceiling 4 min).
-   2. Append `{ name: "report", actor: "qa-report-synthesizer", seconds:
-      <measured>, outcome: "RAN" }` to `time-ledger.json`, update
-      `totalSeconds`, then run `scripts/render-evidence.ps1 -Manifest <path>
-      -ReportPath <the main report path>` **as ONE chained command** — the
-      ledger append is a small in-place edit and render-evidence immediately
-      reads that same file back; there is no judgment step between them worth
-      a separate round-trip. `render-evidence.ps1` is deterministic, zero
-      model calls, and produces the `-evidence.md` companion straight from the
-      workspace artifacts + `analyst-brief.json` + `report-selection.json`
-      (which now includes the report phase's real seconds, since the ledger
-      append happened first in the same chain).
-   Re-save BOTH files as UTF-8 with BOM (PowerShell `[IO.File]::WriteAllText`
-   with `UTF8Encoding($true)`) — chain this onto step 2's command too, same
-   reasoning. **Do NOT restate the verdict or findings in
+8. **Report — both files are script-rendered, ONE chained command, zero model
+   calls.** The plain-language judgment comes from the agents that already
+   hold the context, written during the overlapped phase — qa-analyst's
+   `plain`/`plainQuestion`/`mergeRiskPlain`/`whatsGoodBullets` fields,
+   qa-scenario-writer's `plainTitle`, qa-mutation-author's
+   `suggestedFix.plainOneLiner` — and the report phase itself is
+   deterministic, ~2s, with a reproducible mechanical verdict. Run as ONE
+   chained command —
+   1. `scripts/render-report.ps1 -Manifest <path> -ReportPath <reports/…​.md>
+      -BranchSummary "<the 🧭 one-sentence plain-language branch summary — the
+      one input only the orchestrator holds>" [-Quick]` — writes the main
+      report AND `report-selection.json` (mechanical: top ≤3 findings/questions
+      in the analyst's own priority order; verdict = 🔴 iff a failed test, a
+      NOT MET AC, a breaking contract change, or a risk hard-override, else 🟢).
+   2. Append `{ name: "report", actor: "scripts/render-report.ps1", seconds:
+      <measured, ~1-2s>, outcome: "RAN" }` to `time-ledger.json` + update
+      `totalSeconds`.
+   3. `scripts/render-evidence.ps1 -Manifest <path> -ReportPath <the same
+      path>` — the `-evidence.md` companion, from the workspace artifacts +
+      `analyst-brief.json` + `report-selection.json`.
+   4. Re-save BOTH files as UTF-8 with BOM (PowerShell
+      `[IO.File]::WriteAllText` with `UTF8Encoding($true)`).
+   No agent dispatch, no watchdog, nothing to time but the chain itself.
+   **Do NOT restate the verdict or findings in
    chat** — the closing message is a clickable link to the main report file
    and nothing of its content (the report is the single source of the
    verdict; a chat copy drifts). Then ask which generated tests to keep; on

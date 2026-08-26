@@ -157,9 +157,12 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 
 ## Architecture in one paragraph
 
-**Agents judge, scripts execute.** Six subagents in `.claude/agents/` do only
+**Agents judge, scripts execute.** Five subagents in `.claude/agents/` do only
 judgment work (classification, analysis, test authoring, business-rule mutation
-design, design conformance, report synthesis). Twelve deterministic PowerShell scripts
+design, design conformance) — the judgment includes writing the plain-language
+prose the developer ultimately reads (each agent emits its own plain-language
+fields; no separate report-writing agent exists). Thirteen
+deterministic PowerShell scripts
 in `scripts/` do everything mechanical — cross-platform: Windows PowerShell 5.1+ or
 pwsh 7+ on macOS/Linux (from a bash/zsh shell, invoke as `pwsh scripts/<name>.ps1 …`) (git worktrees, running tests, parsing
 coverage, driving Stryker, contract diffs, the Jira ticket fetch, the risk formula,
@@ -192,7 +195,7 @@ tool is either (a) a generous anti-hang safety valve for a known pathological ca
 at the script level (coverage collection has documented 4×–47× blowups; Stryker
 has no time-limit option of its own), or (b) the **orchestrator-level agent-dispatch
 watchdog**: every background subagent dispatch (`qa-intake`, `qa-analyst`,
-`qa-scenario-writer`, `qa-mutation-author`, `qa-report-synthesizer`,
+`qa-scenario-writer`, `qa-mutation-author`,
 `qa-e2e-author`) is paired with a background timer at 1.5× that agent's target
 duration (floor 3 min) started in the same tool-call batch as the dispatch; a
 timer that fires before the agent's own completion notification means the
@@ -635,46 +638,46 @@ text / layout / tokens / designed states. Findings: `DEVIATES — objective` (si
 side evidence) vs `NEEDS HUMAN JUDGMENT` (never asserted as a defect). Scoped to the
 linked frames only. No link → `SKIPPED — no design linked in ticket`.
 
-### Phase 8 — Report (agent: qa-report-synthesizer, then script: render-evidence.ps1)
-Two writers, in order, not one agent writing both files (all binding rules in
-Reporting below):
-1. **`qa-report-synthesizer` writes the main report** —
+### Phase 8 — Report (scripts only: render-report.ps1 + render-evidence.ps1 — zero model calls)
+No agent writes either file. The plain-language judgment comes from the
+agents that already hold the context, during the overlapped phase: qa-analyst
+writes `findings[].plain`/`plainQuestion`/`mergeRiskPlain`/
+`whatsGoodBullets`, qa-scenario-writer writes each scenario's `plainTitle`,
+qa-mutation-author writes `suggestedFix.plainOneLiner` — and the scripts copy
+that prose VERBATIM). One chained command:
+1. **`scripts/render-report.ps1` writes the main report** —
    `reports/<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md`: max 2 pages,
    plain language for a reader with no QA background and no full-application
    context, feature/user-flow framing (never file:line), the fixed icon set.
    Header line with result → what the branch does → ≤3 findings (each with a
-   🛠️ Do-this action) → ✅ What's good bullets (first bullet: were the
-   ticket's acceptance criteria met — always, evidence-qualified) → ⚖️ merge
-   risk in one plain sentence → ❓ ≤3 questions → 🖐️ manual-check suggestions
-   (when any) → 🔍 what-was-checked table → 🧪 keep-these-tests list →
-   📄 evidence-file link. Its inputs are `analyst-brief.json`,
-   `risk-score.json`, `jira-ticket.json`, plus inline context the orchestrator
-   passes in the dispatch prompt (branch summary, manual-test titles, failed
-   tests, the keep-list) — it never reads raw artifacts like
-   `test-results.json` directly. It also writes `report-selection.json`
-   (shape in `scripts/CONTRACTS.md`): which ≤3 findings/questions (by
-   `analyst-brief.json`'s own ids) it used, so the evidence file shares the
-   exact same numbering.
-2. The orchestrator times step 1's dispatch and appends
-   `{ name: "report", actor: "qa-report-synthesizer", seconds: <measured>,
-   outcome: "RAN" }` to `time-ledger.json` — the one phase that used to be
-   unmeasurable because it lived only inside the file it was writing.
+   🛠️ Do-this action) → ✅ What's good bullets (first bullet: the
+   acceptance-criteria rollup, composed mechanically from `acAlignment`'s
+   grades — always present, evidence-qualified) → ⚖️ merge risk in one plain
+   sentence → ❓ ≤3 questions → 🖐️ manual-check suggestions (when any) →
+   🔍 what-was-checked table → 🧪 keep-these-tests list → 📄 evidence-file
+   link. The verdict is a reproducible mechanical rule: 🔴 iff a failed test,
+   a NOT MET AC, a breaking contract change, or a risk-score hard override —
+   else 🟢. Its one non-artifact input is `-BranchSummary` (the 🧭 sentence,
+   held by the orchestrator). It also writes `report-selection.json`
+   (mechanical: top ≤3 findings/questions by the analyst's own priority order)
+   so the evidence file shares the exact same numbering.
+2. The orchestrator appends `{ name: "report", actor:
+   "scripts/render-report.ps1", seconds: <measured, ~1-2s>, outcome: "RAN" }`
+   to `time-ledger.json`.
 3. **`scripts/render-evidence.ps1` writes the evidence file** — same name +
-   `-evidence.md`, deterministically, zero model calls: ONE merged
-   Phase/Actor/Seconds/Outcome table (from `time-ledger.json`, now including
-   the report phase from step 2 — no more separate, duplicated "Run summary"
-   and "Time ledger" tables), per-finding file:line detail (from
+   `-evidence.md`, deterministically: ONE merged Phase/Actor/Seconds/Outcome
+   table (from `time-ledger.json`), per-finding file:line detail (from
    `analyst-brief.json` + `report-selection.json`, exact same numbering as the
    main report), capability matrix, impact map + manual-testing detail,
    per-level sections (contract ERR/WARN phrasing and the "most likely to
    catch a regression" list render straight from `contract-report.json`/
-   `risk-score.json` — no agent judgment needed for either), the
-   generated-scenarios table, the full Socratic questions, the risk-signal
-   ledger, capture provenance, and the command log.
-After both writers finish, the orchestrator re-saves both files as UTF-8
-**with BOM** (one PowerShell `[IO.File]::WriteAllText` with
-`UTF8Encoding($true)`) so Windows editors render the icons and dashes
-correctly. Append score→outcome to `workspace/<repo>/history.jsonl`.
+   `risk-score.json`), the generated-scenarios table, the full Socratic
+   questions, the risk-signal ledger, capture provenance, and the command log.
+Then the orchestrator re-saves both files as UTF-8 **with BOM** (one
+PowerShell `[IO.File]::WriteAllText` with `UTF8Encoding($true)`) so Windows
+editors render the icons and dashes correctly — all of the above is one
+chained command, not four round-trips. Append score→outcome to
+`workspace/<repo>/history.jsonl`.
 **Chat delivery rule: never restate the verdict or findings in chat.** The
 report file is the single place the verdict lives — the closing chat message is
 a clickable link to the main report (evidence file linked inside it), plus only
@@ -811,31 +814,57 @@ everything the main report dropped, at full rigor:
 | Agent | Judgment it owns | Spawns |
 |---|---|---|
 | `qa-intake` | Diff classification, adapter profiles, Jira ACs + Figma links, bootability/outbound/contract probes | every run |
-| `qa-analyst` | Regression risk, AC alignment, gap lattice, static flaky-smell detection, Socratic questions, manual-test-candidate framing — from script JSON only; writes `analyst-brief.json`, not prose (contract phrasing and the "most likely to catch a regression" list are fully mechanical, rendered by `render-evidence.ps1`) | every run |
-| `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile | cache miss |
-| `qa-mutation-author` | The 3–5 business-rule mutants | mutation consented |
+| `qa-analyst` | Regression risk, AC alignment, gap lattice, static flaky-smell detection, Socratic questions, manual-test-candidate framing — from script JSON only; writes `analyst-brief.json`, not prose, INCLUDING the main report's plain-language prose (`findings[].plain`, `plainQuestion`, `mergeRiskPlain`, `whatsGoodBullets` — `render-report.ps1` copies these verbatim; contract phrasing and the "most likely to catch a regression" list are fully mechanical, rendered by `render-evidence.ps1`) | every run |
+| `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile; each scenario's `plainTitle` (the keep-list line) | cache miss |
+| `qa-mutation-author` | The 3–5 business-rule mutants; each suggestedFix's `plainOneLiner` (its keep-list line) | mutation consented |
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
-| `qa-report-synthesizer` | The main report only — selects/ranks findings into `report-selection.json` | every run |
 
-**Model tiers**: `qa-intake`, `qa-report-synthesizer`, and (as of 2026-08-25,
-Phase E) `qa-analyst` are pinned to a faster model (`model: sonnet` in their
-frontmatter). Intake and the report sit alone on the critical path (intake
-opens every run, the report closes it with nothing overlapping) and their
-work is rule-following extraction/rendering, not open judgment — the original
-rationale for both. `qa-analyst`'s pin is different in kind: it DOES carry
-judgment the findings depend on, but it's pinned anyway because the Phase 2
-prompt diet (inline evidence pack, ~15-call budget, hardened trust rule)
-measured 437.1s → 377.7s on an identical diff — real, but still short of the
-180s target on the run's single longest agent — and that diet already
-reshaped the role into structured, rule-following output (a fixed
+There is no report-writing agent: the main report is rendered deterministically
+by `scripts/render-report.ps1` from the plain-language fields above.
+
+**Model tiers**: `qa-intake` and (as of 2026-08-25, Phase E) `qa-analyst` are
+pinned to a faster model (`model: sonnet` in their frontmatter). Intake sits
+alone on the critical path (it opens every run) and its work is rule-following
+extraction, not open judgment. `qa-analyst`'s pin is different in kind: it
+DOES carry judgment the findings depend on, but it's pinned anyway because
+the Phase 2 prompt diet (inline evidence pack, ~10-call budget, hardened
+trust rule) measured 437.1s → 377.7s on an identical diff — real, but still
+short of the 180s target on the run's single longest agent — and that diet
+already reshaped the role into structured, rule-following output (a fixed
 `analyst-brief.json` schema, inline evidence instead of open exploration)
-rather than removing the pin's justification. Mitigation if quality regresses:
-compare against the pre-pin EC-76015 brief and revert. The other three inherit
+rather than removing the pin's justification. It additionally carries
+`effort: low` in its frontmatter, and — the decisive lever — the repo's
+`.claude/settings.json` pins `CLAUDE_CODE_MAX_THINKING_TOKENS=6000`
+project-wide: measured transcripts show extended-thinking tokens, not model
+tier or tool count, dominate agent wall-clock (an uncapped qa-analyst dispatch
+spent ~23k thinking tokens / ~4 min composing `analyst-brief.json`; capped,
+the same dispatch ran in ~105s with intact output quality — 518s → 105s
+total). Thinking is inherited from the session and has no per-subagent
+override, so the cap binds every session in this repo, orchestrator and
+subagents alike. The other three agents inherit
 the session model: qa-mutation-author's business-rule mutant design is the
 one part of that judgment not yet proven safe to downgrade,
 qa-scenario-writer's tests must compile first try (a bad render burns a CPU
 cycle), and qa-e2e-author runs in the background where a faster model buys no
 wall-clock.
+
+**Thinking-cap quality gate** (check on every real run — the cap is proven
+safe for qa-analyst only; the other agents run under it unverified, and
+every productive thinking burst measured so far fit in 2-4.4k tokens, so
+6000 should only be cutting overdeliberation):
+- qa-scenario-writer: generated tests still compile first try
+  (`run-tests.ps1 -GeneratedOnly` reports it). A compile failure on
+  generated code is the clearest degradation signal.
+- qa-mutation-author: the 3-5 mutants are still business-rule mutations
+  Stryker cannot express (wrong rate, date-boundary, enum member) — not
+  trivial operator flips Stryker already covers — and its own survivors
+  still get a concrete drafted `suggestedFix` edit.
+- qa-analyst: findings still anchored to file:line evidence with a stated
+  consequence; Socratic questions still scenario-first with a real domain
+  value (compare against the 2026-08-26 EC-76015 brief).
+If any check fails, raise `CLAUDE_CODE_MAX_THINKING_TOKENS` to ~10-12k in
+`.claude/settings.json` and re-check — still far under the uncapped ~23k —
+rather than deleting the cap.
 
 ## /qa-impact — blast-radius analysis (standalone entry point)
 

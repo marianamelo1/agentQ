@@ -1,7 +1,11 @@
 <!--
-  agentQ MAIN report skeleton — filled by the qa-report-synthesizer agent.
+  agentQ MAIN report skeleton — rendered by scripts/render-report.ps1
+  (deterministic, zero model calls; the plain-language prose comes verbatim
+  from analyst-brief.json's plain fields, scenarios' plainTitle, and
+  suggestedFix's plainOneLiner — written by the judgment agents during the
+  overlapped phase).
   Audience: a developer with NO QA background and NO full-application context.
-  Rules (from .claude/agents/qa-report-synthesizer.md + CLAUDE.md Reporting):
+  Rules (from CLAUDE.md Reporting):
     - Max 2 pages. Plain everyday words — no QA jargon ("mutant", "coverage %",
       "contract", "vacuous", "flaky" are said in their fixed plain phrasings).
     - Feature/user-flow framing only — never a class name, file path, or
