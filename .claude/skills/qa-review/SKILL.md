@@ -1,6 +1,19 @@
 ---
 name: qa-review
 description: Shift-left QA review of a product-repo feature branch before it becomes a PR — unit/mutation/component/API(+contract) levels, plus E2E and Figma design conformance on frontend branches. Usage - /qa-review [--branch <name-or-fragment>] [--repo <slug-or-fragment>] [--worktree <path-or-name>] [--ticket <KEY>] [--quick], all optional, order-independent, and combinable with plain natural language ("test my branch EC-8876") or a bare branch name with no flags at all. --quick = static lanes only (intake, committed-spec contract diff, impact, analysis, report — no test execution, no mutation), every execution-dependent claim honestly graded. The repo/worktree is auto-detected from whichever registered checkout (including a developer's own `git worktree add` siblings) has a matching branch checked out. Reviews the branch currently checked out in the configured local clone, including uncommitted and untracked work.
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: "pwsh"
+          args: ["-NoProfile", "-File", "scripts/watchdog-hook.ps1", "-Stop"]
+          timeout: 15
+  SubagentStop:
+    - hooks:
+        - type: command
+          command: "pwsh"
+          args: ["-NoProfile", "-File", "scripts/watchdog-hook.ps1", "-SubagentStop"]
+          timeout: 15
 ---
 
 # /qa-review — orchestration
@@ -72,6 +85,24 @@ notification" — which never came for 52 minutes. This procedure bounds that to
 few minutes and keeps the developer informed the whole time. Target: **a full run
 never exceeds 10 minutes** (see CLAUDE.md Performance principles).
 
+**Enforcement, not just prose (GH issue #36):** this frontmatter registers a
+`Stop` hook and a `SubagentStop` hook (`scripts/watchdog-hook.ps1`) for the rest
+of this session. They exist because the procedure below previously worked ONLY
+if the orchestrator remembered, on some later turn, to poll a deadline and to
+sanity-check a subagent's final message — verified live: an overdue dispatch sat
+uncleared for 13–17 minutes with zero nudge/re-dispatch/degrade, because nothing
+forced the check. Now: every `-Arm`/`-Extend`/`-Clear` call below writes to
+`workspace/watchdog-state.json`, and the `Stop` hook blocks (exit 2, reason on
+stderr) at the end of ANY turn where an armed entry is past its deadline — so
+forgetting step 3 below no longer loses the stall silently, the hook forces a
+resume. The `SubagentStop` hook independently catches the false-completion
+pattern in step 2 (a stall placeholder reported as done) on the four
+model/file-work agents, before you'd even see the result. Treat a watchdog
+block as the hook doing its job, not an error: read the reason, act on it (per
+steps 3b–3e below), then continue. Run `pwsh scripts/watchdog-hook.ps1
+-ClearAll` once at Phase 0 (below) and once at Phase 9 cleanup, so a run never
+starts or ends with a stale entry from an earlier task in this same session.
+
 **Run budget**: at the combined-consent moment (step 2), capture the current time
 (`date +%s` via Bash, or `Get-Date` via PowerShell) as the run's start. Every
 stall decision below checks `remaining = 600s - (now - runStart)`.
@@ -95,7 +126,13 @@ progress is the only liveness signal this procedure trusts):
    (`sleep <ceilingSeconds>` via Bash, or `Start-Sleep -Seconds <n>` via
    PowerShell — either is cross-platform; never a `cmd.exe`-only construct) with
    `run_in_background: true`, in the **same tool-call batch** as the dispatch.
-   Whichever completes first re-invokes you.
+   In the SAME batch, also arm the watchdog state file (this is what the `Stop`
+   hook enforces, per GH issue #36 above): `pwsh scripts/watchdog-hook.ps1 -Arm
+   -Label <label> -Agent <agent-type> -CeilingSeconds <ceiling>` (drop the
+   `pwsh` prefix in a native PowerShell session). Use the SAME `<label>` at
+   every subsequent `-Extend`/`-Clear`/re-`-Arm` for this dispatch — it's the
+   only key the hooks and this procedure use to refer to it. Whichever
+   completes first re-invokes you.
 2. **Agent's own completion notification arrives first** → sanity-check it
    before accepting it as done: does its result actually match what it was
    asked for (the expected workspace artifact exists / the response isn't a
@@ -103,20 +140,26 @@ progress is the only liveness signal this procedure trusts):
    agent can report **completed** to the harness while it had spawned its own
    untracked background work and returned an incomplete placeholder answer — a
    **false completion**, distinct from a silent stall, that a bare "wait for
-   the notification" check does not catch. If the result looks genuinely done →
-   normal flow, the timer later firing is a no-op. If it looks incomplete →
-   treat it exactly like a stalled dispatch from step 3b onward (`SendMessage` a
-   nudge to resume it — confirmed live: a nudged agent correctly picked back up
-   and finished with the right answer once told to actually wait for its own
-   background work).
+   the notification" check does not catch (the `SubagentStop` hook now also
+   screens for this pattern independently, before this check even runs). If
+   the result looks genuinely done → clear its entry (`-Clear -Label <label>`)
+   and proceed normally; the timer later firing is a no-op. If it looks
+   incomplete → treat it exactly like a stalled dispatch from step 3b onward
+   (`SendMessage` a nudge to resume it — confirmed live: a nudged agent
+   correctly picked back up and finished with the right answer once told to
+   actually wait for its own background work). Leave the entry armed while
+   incomplete — clearing it early would blind the `Stop` hook to a dispatch
+   that isn't actually done.
 3. **Timer fires first** → the agent is running long or has stalled:
    a. Stream one status line immediately ("`<agent>` is past its expected time
       (ceiling `<n>`s) — checking on it"). Never go dark.
    b. **Check the dispatch's checkpoint artifact FIRST** (per-agent, from the
       table above — existence + last-write time): written or updated since this
       dispatch started → the agent is demonstrably progressing; extend ONCE by
-      ~60s (a new background timer; at most one extension per dispatch, ever)
-      and skip the nudge. On-disk progress is the ONLY liveness signal this
+      ~60s (a new background timer, AND `pwsh scripts/watchdog-hook.ps1 -Extend
+      -Label <label> -AdditionalSeconds 60` so the `Stop` hook's deadline moves
+      with it; at most one extension per dispatch, ever) and skip the nudge.
+      On-disk progress is the ONLY liveness signal this
       procedure trusts — verified live (GH issue #32, reproduced 2-for-2): a
       nudged `qa-mutation-author` replied immediately and coherently
       ("Injecting now — four switches") having written zero bytes, and the
@@ -133,24 +176,32 @@ progress is the only liveness signal this procedure trusts):
       essentially immediately — but per the above, engaging ≠ progressing:
       only the artifact re-check decides, never the reply.)
    d. **Salvage before deciding on a retry** — a checkpoint left by the dead
-      dispatch changes what a retry even is:
+      dispatch changes what a retry even is. A **retry** (inject-only or full
+      fresh) re-`-Arm`s the SAME label with a fresh ceiling (upsert — no
+      separate clear needed first); **giving up** clears it
+      (`-Clear -Label <label>`) since there's nothing left to watch:
       - `mutants.json` at `status: "designed"` → the design work is safe; the
         retry is a cheap **inject-only** re-dispatch of `qa-mutation-author`
         ("`mutants.json` exists at status designed — read it, inject the
-        switches, update the status; do NOT redesign"). If the budget can't
+        switches, update the status; do NOT redesign") — re-`-Arm` the label
+        for the new dispatch's ceiling. If the budget can't
         even carry that, degrade the lane to `DEGRADED — mutants designed,
-        not executed (agent stalled before injection)` — the designs stay in
+        not executed (agent stalled before injection)` and `-Clear` the label —
+        the designs stay in
         `mutants.json` and the evidence file says so; never report the tier
         as if nothing was produced.
       - `analyst-brief.json` at `status: "partial"` → render from the partial
         brief with the gap-lattice/flaky sections honestly degraded
-        (`DEGRADED — analysis cut short after checkpoint`), rather than
+        (`DEGRADED — analysis cut short after checkpoint`) and `-Clear` the
+        label, rather than
         losing the findings/AC grades/questions it already contains.
       - No checkpoint at all → full fresh re-dispatch (same original inputs;
         all six agents are idempotent over their workspace inputs), budget
-        permitting: `remaining >= ceiling + 20s + 15s buffer`. If the budget
+        permitting: `remaining >= ceiling + 20s + 15s buffer` — re-`-Arm` the
+        label for the new dispatch. If the budget
         does not allow it, or this is already a retry, stop: don't retry a
-        third time regardless of budget.
+        third time regardless of budget — `-Clear` the label and degrade the
+        lane instead.
    e. Any stall/extension/retry gets an honest `time-ledger.json` row with the
       REAL elapsed seconds (never 0, never "not comparable" — see the
       corrected-ledger rule), labeled `DEGRADED — agent stalled, lane skipped
@@ -160,18 +211,25 @@ progress is the only liveness signal this procedure trusts):
       given-up lane as degraded, never silently missing it.
 
 **Procedure for a background shell job** (`stryker-run.ps1` in step 5,
-`worktree.ps1 -EnsureBase` in step 7): same paired-timer start, but there's no
+`worktree.ps1 -EnsureBase` in step 7): same paired-timer start (also `-Arm` a
+label for it, same as an agent dispatch — the `Stop` hook doesn't distinguish
+agent dispatches from background shell jobs, it just checks the state file),
+but there's no
 `SendMessage` target — on the timer firing first, stream the status line, then
 check the job's actual state (its own log/output files, or `TaskOutput` if the
 harness exposes it for that background task) rather than nudging: growing
-output → extend once with a timer at half the original ceiling; no progress /
-process gone → `DEGRADED` row with real elapsed time, run continues without that
+output → extend once with a timer at half the original ceiling (`-Extend` to
+match); no progress /
+process gone → `DEGRADED` row with real elapsed time, `-Clear` the label, run
+continues without that
 phase's result (e.g., mutation results marked not completed this run).
 
 ## Run loop
 
 1. **Preflight** — read `.claude/qa-agent-config.jsonc` (missing → tell the user to
-   copy the example; stop). Resolve the repo/worktree:
+   copy the example; stop). Run `pwsh scripts/watchdog-hook.ps1 -ClearAll` here
+   too (harmless if already empty) — a stale armed entry from an earlier task in
+   this same session must never carry into a fresh run. Resolve the repo/worktree:
    - `--worktree <value>` given AND it resolves to a real directory on this
      machine → `scripts/worktree.ps1 -DetectRepo -ConfigPath <cfg> -WorktreePath
      <value> [-RepoFilter <exact key, if --repo was also given>]`.
@@ -480,7 +538,10 @@ phase's result (e.g., mutation results marked not completed this run).
    per adapter profile; the canonical file content lives in
    `<workspaceDir>/generated/`).
 9. **Cleanup verify** — `scripts/worktree.ps1 -Verify`. Confirm product repo
-   untouched.
+   untouched. Run `pwsh scripts/watchdog-hook.ps1 -ClearAll` as a final
+   belt-and-suspenders — every dispatch above should already have cleared its
+   own label, so this is normally a no-op; it exists to guarantee the run never
+   ends leaving an armed entry behind.
 
 ## Hard rules (repeated because they get tested)
 - A zero-match test filter, a 404'd OpenAPI route, an unreachable broker, a skipped

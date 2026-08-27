@@ -215,6 +215,23 @@ function Get-RepoNuGetConfigOverride {
     return $result
 }
 
+function Get-JsProjectDir {
+    # adapter-profiles.json's `projectPath` for a JS project is the path to its
+    # project DESCRIPTOR FILE (Nx's project.json, or package.json for a plain
+    # JS project) - the exact same convention as the .NET side's `.csproj` path
+    # (see Get-RepoNuGetConfigOverride's caller, which strips '.csproj' the same
+    # way). Bug found live 2026-08-27 reviewing e-conomic/client: every caller
+    # here used to take `projectPath` AS the project directory, so the derived
+    # prefix ("libs/payroll/module/project.json/") never matched any real file
+    # path ("libs/payroll/module/src/..."). Every changed file was filtered out,
+    # Invoke-JestRelatedRun saw zero candidates, and the run was silently
+    # recorded as "no changed JS files under this project" - 0 tests ever ran
+    # for an Nx `project.json`-based profile, on every review, silently.
+    param([Parameter(Mandatory = $true)][string]$ProjectPath)
+    $p = ($ProjectPath -replace '\\', '/') -replace '/(project|package)\.json$', ''
+    return $p.TrimEnd('/')
+}
+
 function Invoke-JestRelatedRun {
     # File-granular JS selection: per-project `jest --findRelatedTests <changed
     # files>` with per-test JSON results.
@@ -230,7 +247,7 @@ function Invoke-JestRelatedRun {
         [Parameter(Mandatory = $true)][string]$CovDir,
         [bool]$WantCoverage = $false
     )
-    $projRoot = (([string](Get-Prop $Prof 'projectPath' '')) -replace '\\', '/').TrimEnd('/')
+    $projRoot = Get-JsProjectDir -ProjectPath ([string](Get-Prop $Prof 'projectPath' ''))
     $projKey = $projRoot -replace '[\\/:]', '_'
     if ($projKey -eq '') { $projKey = 'root' }
     $result = @{ SkippedNoFiles = $false; RelatedFileCount = 0; Command = $null; ExitCode = 0
@@ -879,6 +896,25 @@ try {
 
     $covDir = Join-Path $workspaceDir 'cov'
     if (-not (Test-Path -LiteralPath $covDir)) { New-Item -ItemType Directory -Force -Path $covDir | Out-Null }
+    elseif (-not $GeneratedOnly) {
+        # Bug found live 2026-08-27: a JS project whose test run is skipped this
+        # run (or that errors before writing coverage) left a PREVIOUS run's flat
+        # cov/<projKey>.cobertura.xml sitting untouched, and diff-coverage.ps1
+        # (which just globs cov\*.cobertura.xml with no freshness check) read it
+        # as if it were this run's evidence - reporting real-looking coverage
+        # numbers for a project that executed zero tests this run. Only this
+        # plain (non-GeneratedOnly) path ever writes that flat file, so clear
+        # every JS project's copy up front - each one regenerates its own fresh
+        # copy below if it actually runs with coverage; one that's skipped or
+        # doesn't produce coverage this run then honestly has none to find.
+        foreach ($p in $profiles) {
+            $fw = [string](Get-Prop $p 'framework' '')
+            if (@('jest', 'vitest') -notcontains $fw) { continue }
+            $pk = (Get-JsProjectDir -ProjectPath ([string](Get-Prop $p 'projectPath' ''))) -replace '[\\/:]', '_'
+            $staleXml = Join-Path $covDir "$pk.cobertura.xml"
+            if (Test-Path -LiteralPath $staleXml -PathType Leaf) { Remove-Item -LiteralPath $staleXml -Force -ErrorAction SilentlyContinue }
+        }
+    }
     $trxDir = Join-Path $workspaceDir 'trx'
     if (-not (Test-Path -LiteralPath $trxDir)) { New-Item -ItemType Directory -Force -Path $trxDir | Out-Null }
 
@@ -1082,7 +1118,14 @@ try {
         }
 
         if ($isJs) {
+            # $projRoot stays the RAW profile value (the project descriptor file
+            # path, e.g. ".../project.json") for reporting - same convention as
+            # the .NET branch above, which reports the raw .csproj path too.
+            # $projDir is the actual directory, only needed where a directory is
+            # genuinely required (Push-Location / jest-config lookup below) - see
+            # Get-JsProjectDir's comment for the bug this split fixes.
             $projRoot = ([string](Get-Prop $prof 'projectPath' '')) -replace '\\', '/'
+            $projDir = Get-JsProjectDir -ProjectPath $projRoot
             $resultsFile = Join-Path $workspaceDir "jest-results-$(($projRoot -replace '[\\/:]', '_')).json"
             if ($GeneratedOnly -and -not [string]::IsNullOrWhiteSpace($ResultsLabel)) {
                 $resultsFile = Join-Path $workspaceDir "jest-results-generated-$(($ResultsLabel -replace '[^A-Za-z0-9._-]', '-'))-$(($projRoot -replace '[\\/:]', '_')).json"
@@ -1096,7 +1139,7 @@ try {
                 # Direct jest with the project's own config — NOT `nx affected`: nx's
                 # fan-out yields aggregate counts only, and anti-vacuity needs per-test
                 # outcomes to prove it was the GENERATED tests that failed on base.
-                $projDirAbs = Join-Path $execRoot ($projRoot -replace '/', [IO.Path]::DirectorySeparatorChar)
+                $projDirAbs = Join-Path $execRoot ($projDir -replace '/', [IO.Path]::DirectorySeparatorChar)
                 $jestCfg = $null
                 foreach ($cand in @('jest.config.ts', 'jest.config.js', 'jest.config.cjs', 'jest.config.mjs')) {
                     $p = Join-Path $projDirAbs $cand
