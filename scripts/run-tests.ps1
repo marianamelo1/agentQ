@@ -1417,7 +1417,78 @@ try {
         mightBeFlaky = @($mightBeFlaky.ToArray())
     }
 
-    Write-JsonFileNoBom -Object ([ordered]@{ runs = @($runs.ToArray()); flaky = $flaky }) -Path (Join-Path $workspaceDir $resultsName)
+    # GH issue #37: a generated test whose renderedTo path pointed outside every
+    # test project's directory used to compile+run nothing and never be caught -
+    # the "N/N passed" count above only counts what DID run, so it silently
+    # excluded whatever never got materialized (worktree.ps1's own Copy-
+    # GeneratedTests now refuses to stage such a file, but that refusal is only
+    # visible as a Write-Warning during the -Ensure step, easy to miss by the
+    # time this script's summary is read). Cross-check here too, independently:
+    # for every scenario claiming a renderedTo path, does that exact file exist
+    # in the tree we just executed? A scenario whose file is missing never
+    # compiled and could not possibly have contributed to the pass count above.
+    #
+    # Issue #37 follow-on, same live-verified failure shape one layer deeper:
+    # a method can compile inside the CORRECT file yet still never be selected
+    # by --filter Category=agentQ-generated (Get-DotnetTestFilter -GeneratedCategory
+    # above) if it's missing the agentQ-generated category tag -- verified live
+    # when qa-scenario-writer extended a developer-authored file and matched
+    # that file's untagged surrounding methods instead of tagging its OWN new
+    # ones. For every scenario whose file DOES exist, also check its
+    # renderedTestMethod actually carries the tag a few lines above its
+    # declaration -- a regex proximity check, not a real parse, but the tag
+    # string is a literal ("agentQ-generated") with no framework-specific
+    # syntax to get wrong.
+    $orphanedGeneratedFiles = @()
+    $untaggedGeneratedMethods = @()
+    if ($GeneratedOnly) {
+        $scenariosDir = Join-Path $workspaceDir 'scenarios'
+        if (Test-Path -LiteralPath $scenariosDir -PathType Container) {
+            foreach ($sf in (Get-ChildItem -LiteralPath $scenariosDir -Filter 'scenario-*.json' -File -ErrorAction SilentlyContinue)) {
+                $scenario = $null
+                try { $scenario = Read-JsonFile -Path $sf.FullName } catch { continue }
+                $scenarioId = [string](Get-Prop $scenario 'id' $sf.BaseName)
+                $methodName = [string](Get-Prop $scenario 'renderedTestMethod' '')
+                foreach ($rt in @(Get-Prop $scenario 'renderedTo' @())) {
+                    $rtPath = [string]$rt
+                    if ([string]::IsNullOrWhiteSpace($rtPath)) { continue }
+                    $onDisk = Join-Path $execRoot ($rtPath -replace '/', [IO.Path]::DirectorySeparatorChar)
+                    if (-not (Test-Path -LiteralPath $onDisk -PathType Leaf)) {
+                        $orphanedGeneratedFiles += [ordered]@{ scenarioId = $scenarioId; renderedTo = $rtPath }
+                        continue
+                    }
+                    if ($methodName -eq '') { continue }
+                    $fileLines = $null
+                    try { $fileLines = @(Get-Content -LiteralPath $onDisk -ErrorAction Stop) } catch { $fileLines = $null }
+                    if ($null -eq $fileLines) { continue }
+                    $methodLineIdx = -1
+                    for ($i = 0; $i -lt $fileLines.Count; $i++) {
+                        if ($fileLines[$i] -match "\b$([regex]::Escape($methodName))\s*[<(]") { $methodLineIdx = $i; break }
+                    }
+                    # methodLineIdx -1 (renderedTestMethod itself doesn't match anything in
+                    # the file) is a DIFFERENT failure than a missing tag -- not flagged
+                    # here to avoid a false positive from a stale/wrong method name.
+                    if ($methodLineIdx -ge 0) {
+                        $scanStart = [Math]::Max(0, $methodLineIdx - 6)
+                        $window = ($fileLines[$scanStart..$methodLineIdx] -join "`n")
+                        if ($window -notmatch 'agentQ-generated') {
+                            $untaggedGeneratedMethods += [ordered]@{ scenarioId = $scenarioId; renderedTo = $rtPath; method = $methodName }
+                        }
+                    }
+                }
+            }
+        }
+        if (@($orphanedGeneratedFiles).Count -gt 0) {
+            $orphanIds = ($orphanedGeneratedFiles | ForEach-Object { $_.scenarioId }) -join ', '
+            Write-Warning "run-tests -GeneratedOnly: $(@($orphanedGeneratedFiles).Count) scenario(s) claim a renderedTo path that does not exist in $execRoot -- never compiled, never ran, NOT reflected in the pass count above. Affected scenario ids: $orphanIds. See GH issue #37."
+        }
+        if (@($untaggedGeneratedMethods).Count -gt 0) {
+            $untaggedIds = ($untaggedGeneratedMethods | ForEach-Object { "$($_.scenarioId) ($($_.method))" }) -join ', '
+            Write-Warning "run-tests -GeneratedOnly: $(@($untaggedGeneratedMethods).Count) scenario(s) compile but are missing the agentQ-generated category tag -- --filter Category=agentQ-generated will never select them, NOT reflected in the pass count above. Affected: $untaggedIds. See GH issue #37."
+        }
+    }
+
+    Write-JsonFileNoBom -Object ([ordered]@{ runs = @($runs.ToArray()); flaky = $flaky; orphanedGeneratedFiles = @($orphanedGeneratedFiles); untaggedGeneratedMethods = @($untaggedGeneratedMethods) }) -Path (Join-Path $workspaceDir $resultsName)
 
     # ---------------- calibration (merge, never clobber unrelated keys) ---------
     if (-not $GeneratedOnly -and ($plainRunSecondsTotal -gt 0 -or $covSeenData.Count -gt 0 -or $covSeenEmpty.Count -gt 0)) {
@@ -1452,7 +1523,11 @@ try {
     $mode = if ($GeneratedOnly) { 'generated' } else { 'affected' }
     $skippedSuffix = ''
     if ($totalSkippedRuns -gt 0) { $skippedSuffix = "  -  $totalSkippedRuns project(s) skipped (see skippedReason)" }
-    Write-Output ("run-tests ({0}): {1} project run(s)  -  {2}/{3} passed{4}{5} -> {6}" -f $mode, $runs.Count, $totalPassed, $totalExecuted, $(if ($anyZeroMatch) { '  -  WARNING: at least one zero-match filter' } else { '' }), $skippedSuffix, $resultsName)
+    $orphanSuffix = ''
+    if (@($orphanedGeneratedFiles).Count -gt 0) { $orphanSuffix = "  -  WARNING: $(@($orphanedGeneratedFiles).Count) scenario(s) never compiled (orphaned renderedTo path, GH issue #37)" }
+    $untaggedSuffix = ''
+    if (@($untaggedGeneratedMethods).Count -gt 0) { $untaggedSuffix = "  -  WARNING: $(@($untaggedGeneratedMethods).Count) scenario(s) compiled but untagged, never selected (GH issue #37)" }
+    Write-Output ("run-tests ({0}): {1} project run(s)  -  {2}/{3} passed{4}{5}{6}{7} -> {8}" -f $mode, $runs.Count, $totalPassed, $totalExecuted, $(if ($anyZeroMatch) { '  -  WARNING: at least one zero-match filter' } else { '' }), $skippedSuffix, $orphanSuffix, $untaggedSuffix, $resultsName)
     exit 0
 }
 catch {

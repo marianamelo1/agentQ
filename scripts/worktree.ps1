@@ -393,20 +393,80 @@ function Get-WorkspaceWorktreeDirs {
     return ,@($found)
 }
 
+function Get-JsonProp {
+    # StrictMode-safe property access on a PSCustomObject from ConvertFrom-Json -
+    # touching a missing property directly throws under Set-StrictMode -Version
+    # Latest (in effect for this whole script). Self-contained per-script copy,
+    # not a shared helper - matches this codebase's convention (see
+    # report-pack.ps1 / semantic-mutant-driver.ps1's own identical helpers).
+    param($Object, [string]$Name, $Default = $null)
+    if ($null -eq $Object) { return $Default }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -ne $p -and $null -ne $p.Value) { return $p.Value }
+    return $Default
+}
+
 function Copy-GeneratedTests {
     # Re-materializes the workspace's generated-test staging dir (see the header
     # note) into a worktree. Idempotent; overwrites are correct  -  the staging dir
     # is the single source of truth for agent-authored tests, so a clean/reset can
     # never lose one. Returns the file count copied.
+    #
+    # GH issue #37: this function used to mirror ANY relative path under
+    # generated/ verbatim, no matter where it pointed. A qa-scenario-writer
+    # dispatch once wrote a file's renderedTo/physical path missing its test
+    # project's prefix (e.g. "Infrastructure/Payroll/Decorators/Foo.cs" instead
+    # of "apps/backend/tests/.../Infrastructure/Payroll/Decorators/Foo.cs") -
+    # this function faithfully copied it to the worktree ROOT, outside every
+    # .csproj's glob, where it silently never compiled or ran, forever, on
+    # every run. This is the backstop: validate each file's relative path
+    # starts under one of adapter-profiles.json's known project directories
+    # (placementRoot, or the containing dir of a project without one) before
+    # copying it in - a path that matches nothing is dead code by
+    # construction and gets skipped with a loud warning instead of silently
+    # materialized. A missing/unreadable adapter-profiles.json degrades to the
+    # old unvalidated behavior (never block staging on a dependency this
+    # function doesn't otherwise need) rather than rejecting everything.
     param(
         [Parameter(Mandatory = $true)][string]$WorkspaceDir,
         [Parameter(Mandatory = $true)][string]$TargetDir
     )
     $gen = Join-Path $WorkspaceDir 'generated'
     if (-not (Test-Path -LiteralPath $gen -PathType Container)) { return 0 }
+
+    # Known test-project directories this generated test COULD legitimately land
+    # under, normalized to forward-slash (adapter-profiles.json's own convention -
+    # every path example in CONTRACTS.md uses '/', never a platform separator).
+    $knownRoots = @()
+    $adapterPath = Join-Path $WorkspaceDir 'adapter-profiles.json'
+    if (Test-Path -LiteralPath $adapterPath -PathType Leaf) {
+        try {
+            $adapterDoc = Get-Content -LiteralPath $adapterPath -Raw | ConvertFrom-Json
+            foreach ($p in @(Get-JsonProp $adapterDoc 'projects' @())) {
+                $root = [string](Get-JsonProp $p 'placementRoot' '')
+                if ($root -eq '') {
+                    $projPath = [string](Get-JsonProp $p 'projectPath' '')
+                    if ($projPath -ne '') { $root = ($projPath -replace '\\', '/') -replace '/[^/]+$', '' }
+                }
+                if ($root -ne '') { $knownRoots += ($root -replace '\\', '/').TrimEnd('/') }
+            }
+        } catch { $knownRoots = @() }   # unreadable/corrupt - fall back to unvalidated copy below
+    }
+
     $copied = 0
     foreach ($f in (Get-ChildItem -LiteralPath $gen -Recurse -File -ErrorAction SilentlyContinue)) {
         $rel = $f.FullName.Substring($gen.Length).TrimStart('\', '/')
+        $relForward = $rel -replace '\\', '/'
+        if (@($knownRoots).Count -gt 0) {
+            $matchesKnownProject = $false
+            foreach ($root in $knownRoots) {
+                if ($relForward -eq $root -or $relForward.StartsWith("$root/")) { $matchesKnownProject = $true; break }
+            }
+            if (-not $matchesKnownProject) {
+                Write-Warning "Copy-GeneratedTests: '$relForward' does not fall under any known test project directory from adapter-profiles.json (checked: $($knownRoots -join ', ')) -- skipping, NOT staged into the worktree. This file would compile/run nowhere; see GH issue #37. Fix its renderedTo path at the source (qa-scenario-writer) and re-render, or delete the stale file from '$gen'."
+                continue
+            }
+        }
         $dst = Join-Path $TargetDir $rel
         $dstDir = Split-Path -Parent $dst
         if (-not (Test-Path -LiteralPath $dstDir)) {
