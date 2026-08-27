@@ -201,10 +201,18 @@ duration (floor 3 min) started in the same tool-call batch as the dispatch; a
 timer that fires before the agent's own completion notification means the
 dispatch is running unusually long or has stalled outright (verified live
 2026-08-25: a session-level stream stall left two agents silent for 52 minutes
-with zero recovery, because no such watchdog existed) — see `.claude/skills/
-qa-review/SKILL.md`'s watchdog section for the full nudge/re-dispatch/degrade
-procedure, gated by a 10-minute run-wide budget so a retry can never blow the
-target. Both kinds of timeout degrade honestly, never silently, and the real
+with zero recovery, because no such watchdog existed). The watchdog's liveness
+signal is each agent's **checkpoint artifact** — every critical-path agent is
+briefed to write its output file EARLY (qa-mutation-author: `mutants.json` at
+`status: "designed"` before injecting; qa-analyst: `analyst-brief.json` at
+`status: "partial"` before the coverage-dependent sections; qa-intake:
+`adapter-profiles.json` before the deeper probes), because GH issue #32 proved
+twice that a chat reply is not evidence of progress (a nudged agent answered
+"Injecting now" having written zero bytes, and the lane was lost whole) and
+that a stall without a checkpoint salvages nothing — see `.claude/skills/
+qa-review/SKILL.md`'s watchdog section for the full checkpoint-check/nudge/
+salvage/re-dispatch/degrade procedure, gated by a 10-minute run-wide budget so
+a retry can never blow the target. Both kinds of timeout degrade honestly, never silently, and the real
 elapsed time (including any stall) is always what lands in `time-ledger.json` —
 never zeroed out or approximated away, even when the cause is infrastructure
 flakiness rather than agentQ's own work.
@@ -546,13 +554,26 @@ via `git apply`, untracked files copied in — usually already ensured back in P
 4's dispatch batch). Design + injection may already have happened during Phase 4
 (overlapped model/file work); the CPU-heavy steps below start only after Phase 2's
 run has finished.
-1. **AI business-rule tier first** (~30–45 s): qa-mutation-author designs 3–5
-   semantic mutants — prefer fewer, higher-value over reaching for the old
-   upper end (numeric/decimal literals, enum members, date arithmetic,
+1. **AI business-rule tier first** (~30–45 s): qa-mutation-author designs up to
+   3 semantic mutants — fewer, higher-value; capped at 3 after GH issue #32
+   showed six candidate sites plus promotion surgery was too much un-written
+   state to hold (numeric/decimal literals, enum members, date arithmetic,
    multi-site rule rewrites — the mutations Stryker verifiably cannot express; only
-   where mechanical mutants all die or none applies). All injected at once behind
+   where mechanical mutants all die or none applies). **Checkpoint before
+   injecting** (issue #32, verified live twice: a stalled dispatch that had
+   finished its design in context left zero bytes on disk): the agent writes
+   `mutants.json` with the design and `status: "designed"` BEFORE touching the
+   worktree, then injects, then updates to `status: "injected"` — the driver
+   refuses a design-only file, a stall after the checkpoint is salvageable as a
+   cheap inject-only re-dispatch, and the file's existence is the watchdog's
+   real progress signal. "First" is also a budget rule, not just an ordering:
+   at Phase 5 the AI tier holds first claim on the remaining run budget
+   (salvage/driver before Stryker or anything optional) — in both issue-#32
+   runs it lost the budget race the ordering was supposed to prevent. All
+   mutants injected at once behind
    `AGENTQ_MUTANT` env-var switches (a `const` is promoted to a static property in
-   the worktree copy), **one** build, then
+   the worktree copy — sites pre-listed mechanically by `report-pack.ps1`'s
+   "Const declarations in the diff" pack section), **one** build, then
    `scripts/semantic-mutant-driver.ps1` runs one filtered test pass per id —
    bounded-parallel (up to 3 concurrent; the switch is a per-PROCESS env var set
    via a cmd wrapper, so concurrent mutants cannot see each other's value —
@@ -838,7 +859,7 @@ everything the main report dropped, at full rigor:
 | `qa-intake` | Diff classification, adapter profiles, Jira ACs + Figma links, bootability/outbound/contract probes | every run |
 | `qa-analyst` | Regression risk, AC alignment, gap lattice, static flaky-smell detection, Socratic questions, manual-test-candidate framing — from script JSON only; writes `analyst-brief.json`, not prose, INCLUDING the main report's plain-language prose (`findings[].plain`, `plainQuestion`, `mergeRiskPlain`, `whatsGoodBullets` — `render-report.ps1` copies these verbatim; contract phrasing and the "most likely to catch a regression" list are fully mechanical, rendered by `render-evidence.ps1`) | every run |
 | `qa-scenario-writer` | Scenario IR per AC + component/API test renders per adapter profile; each scenario's `plainTitle` (the keep-list line) | cache miss |
-| `qa-mutation-author` | The 3–5 business-rule mutants; each suggestedFix's `plainOneLiner` (its keep-list line) | mutation consented |
+| `qa-mutation-author` | The ≤3 business-rule mutants; each suggestedFix's `plainOneLiner` (its keep-list line) | mutation consented |
 | `qa-e2e-author` | Playwright authoring/healing + Figma design conformance — never spec execution | background, frontend branches |
 
 There is no report-writing agent: the main report is rendered deterministically
@@ -877,7 +898,7 @@ every productive thinking burst measured so far fit in 2-4.4k tokens, so
 - qa-scenario-writer: generated tests still compile first try
   (`run-tests.ps1 -GeneratedOnly` reports it). A compile failure on
   generated code is the clearest degradation signal.
-- qa-mutation-author: the 3-5 mutants are still business-rule mutations
+- qa-mutation-author: the ≤3 mutants are still business-rule mutations
   Stryker cannot express (wrong rate, date-boundary, enum member) — not
   trivial operator flips Stryker already covers — and its own survivors
   still get a concrete drafted `suggestedFix` edit.

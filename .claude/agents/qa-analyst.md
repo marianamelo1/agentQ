@@ -91,12 +91,19 @@ agent) both read directly. Because a SCRIPT renders the main report verbatim
 from your plain-language fields, those fields are the exact sentences the
 developer reads — no model rewrites them after you.
 
-You may be dispatched concurrently with the unit-test/coverage scripts (they take
-under two minutes; you typically run longer) — if `diff-coverage.json` or
-`test-results.json` isn't there yet when you start, write `findings`,
-`acAlignment`, and `socraticQuestions` first (they don't need those files) and
-check again before writing `gapLattice` and `flakyInterpretation`. Missing early
-in your run means "not ready yet," not "doesn't exist."
+**Checkpoint write, then final write — always two writes, never one** (GH issue
+#32: an agent that writes once at the end gives the watchdog nothing to read and
+leaves nothing salvageable if it stalls). As soon as `findings`, `acAlignment`,
+`socraticQuestions`, and the plain-language fields are composed — they don't
+need the test/coverage artifacts — Write `analyst-brief.json` with those
+sections and top-level `"status": "partial"`. Then read `diff-coverage.json` /
+`test-results.json` (you may be dispatched concurrently with the unit-test/
+coverage scripts — they take under two minutes; you typically run longer;
+missing early in your run means "not ready yet," not "doesn't exist"), compose
+`gapLattice` and `flakyInterpretation`, and rewrite the file complete with
+`"status": "complete"`. If you stall after the first write, the orchestrator
+can still render your findings with the coverage-dependent sections honestly
+degraded.
 
 **Trust intake's citations by default.** When the pack or the AC text already
 cites concrete evidence (a file:line, a key, a function name, a specific
@@ -266,8 +273,9 @@ finding 2").
 ## Write the file, then stop
 
 Write `<workspaceDir>/analyst-brief.json` (UTF-8, no BOM — same convention as
-every other script/agent artifact) with all fields above. Your final chat
-message is ONE short paragraph: counts only (e.g. "analyst-brief.json written:
+every other script/agent artifact) with all fields above and
+`"status": "complete"` (the checkpoint rule above means this is your SECOND
+write of the file). Your final chat message is ONE short paragraph: counts only (e.g. "analyst-brief.json written:
 3 findings (1 High, 2 Med), 7/11 ACs verified by executed test · 3 static-only ·
 1 unverifiable, 40/40 existing tests passed, 2 Socratic questions, 0 manual-test
 candidates.") — never the findings/questions/AC text itself; that's what the

@@ -243,6 +243,19 @@ if (-not (Test-Path -LiteralPath $mutantsPath)) {
 $doc     = Get-Content -LiteralPath $mutantsPath -Raw | ConvertFrom-Json
 $mutants = @(Get-Prop $doc 'mutants' @())
 
+# Checkpoint guard (GH issue #32): qa-mutation-author writes mutants.json in two
+# stages -- "designed" (design checkpointed, switches NOT in the worktree yet)
+# then "injected" (safe to run). Running against a design-only file would test
+# unmutated code and report every mutant Survived -- pure noise. Absent status =
+# a legacy file written before the checkpoint existed; treat as injected.
+$docStatus = [string](Get-Prop $doc 'status' 'injected')
+if ($docStatus -eq 'designed') {
+    throw ("mutants.json at $mutantsPath has status 'designed' -- the mutants are designed but not injected " +
+           "into the worktree yet. Dispatch qa-mutation-author (inject-only) to finish the injection, " +
+           "or report the lane DEGRADED (mutants designed, not executed). Refusing to run: it would " +
+           "produce all-Survived noise against unmutated code.")
+}
+
 if ($mutants.Count -eq 0) {
     Write-Output '0 survived / 0 killed / 0 skipped'
     exit 0

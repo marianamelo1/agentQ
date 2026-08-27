@@ -132,6 +132,12 @@ if ($For -eq 'analyst') {
     Add-Line ''
 
     $diffSet = Read-JsonOrNull (WsPath 'diff-set.json')
+    # Collected while walking the diff below; emitted as its own section after it.
+    # WHY (GH issue #32): qa-mutation-author must promote any `const` in scope to a
+    # static property before it can host an AGENTQ_MUTANT switch -- pre-listing the
+    # sites here means the agent holds less un-written state before its first
+    # mutants.json checkpoint, instead of re-deriving the promotion surgery itself.
+    $constSites = New-Object 'System.Collections.Generic.List[string]'
     Add-Line "## Diff hunks (git diff against baseSha $baseSha)"
     if ($null -eq $diffSet) {
         Add-Line "NOT AVAILABLE - diff-set.json not found in workspace."
@@ -158,6 +164,16 @@ if ($For -eq 'analyst') {
             if ([string]::IsNullOrWhiteSpace($diffText)) { Add-Line '(no diff text produced - file may be binary or the path may have moved)' }
             else { Add-Line $diffText.TrimEnd() }
             Add-Line '```'
+            if ($f -like '*.cs' -and -not [string]::IsNullOrWhiteSpace($diffText)) {
+                foreach ($dl in ($diffText -split "`n")) {
+                    # Added lines only ('+' but not the '+++' file header): a const
+                    # the diff itself introduces or touches is exactly the site the
+                    # mutation agent may need to promote.
+                    if ($dl -match '^\+(?!\+\+)' -and $dl -match '\bconst\s+\w') {
+                        $constSites.Add("- $f : ``$($dl.Substring(1).Trim())``") | Out-Null
+                    }
+                }
+            }
         }
         foreach ($f in $untracked) {
             Add-Line ''
@@ -170,10 +186,30 @@ if ($For -eq 'analyst') {
                 Add-Line ('```' + $ext)
                 Add-Line $content.TrimEnd()
                 Add-Line '```'
+                if ($f -like '*.cs' -and -not [string]::IsNullOrWhiteSpace($content)) {
+                    $lineNo = 0
+                    foreach ($cl in ($content -split "`n")) {
+                        $lineNo++
+                        if ($cl -match '\bconst\s+\w') {
+                            $constSites.Add("- $f`:$lineNo : ``$($cl.Trim())``") | Out-Null
+                        }
+                    }
+                }
             } else {
                 Add-Line '(file not found on disk)'
             }
         }
+    }
+    Add-Line ''
+
+    # For the qa-mutation-author dispatch (same pack, per SKILL.md step 4);
+    # qa-analyst/qa-scenario-writer can ignore this section.
+    Add-Line "## Const declarations in the diff (mutation-injection mechanics)"
+    if ($constSites.Count -eq 0) {
+        Add-Line "None found in the changed/untracked C# lines - no const -> static-property promotion needed for AGENTQ_MUTANT switches."
+    } else {
+        Add-Line "A ``const`` cannot host an AGENTQ_MUTANT env-var switch - each site below needs promoting to a static property (worktree copy only, use sites updated) if it hosts a mutant:"
+        foreach ($cs in $constSites) { Add-Line $cs }
     }
     Add-Line ''
 
