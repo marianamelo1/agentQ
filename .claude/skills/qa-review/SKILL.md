@@ -77,15 +77,17 @@ never exceeds 10 minutes** (see CLAUDE.md Performance principles).
 stall decision below checks `remaining = 600s - (now - runStart)`.
 
 **Per-dispatch ceiling** (1.5× the agent's target, floor 3 min — see each step
-below for which applies):
-| Agent | Target | Ceiling |
-|---|---|---|
-| `qa-intake` | 90s (cache hit) | 3 min |
-| `qa-analyst` | 180s | 4.5 min |
-| `qa-scenario-writer` | 180s | 4.5 min |
-| `qa-mutation-author` (either dispatch) | 180s | 4.5 min |
-| `qa-e2e-author` | n/a — background, off critical path (CLAUDE.md Phase 7b: never blocks the verdict) | 15 min, informational only — not gated by the run budget; a stall here just means its addendum is missing this run, reported as such |
-| background shell job (`stryker-run.ps1`, `worktree.ps1 -EnsureBase`) | the script's own `-TimeoutMinutes`/anti-hang valve | that valve + 1 min |
+below for which applies) and **checkpoint artifact** (the file each agent is
+briefed to write EARLY, before its expensive step — GH issue #32: on-disk
+progress is the only liveness signal this procedure trusts):
+| Agent | Target | Ceiling | Checkpoint artifact |
+|---|---|---|---|
+| `qa-intake` | 90s (cache hit) | 3 min | `adapter-profiles.json` (written before the deeper probes) |
+| `qa-analyst` | 180s | 4.5 min | `analyst-brief.json` at `status: "partial"` (findings/AC/questions before the coverage-dependent sections) |
+| `qa-scenario-writer` | 180s | 4.5 min | first file under `<workspaceDir>/scenarios/` or `generated/` |
+| `qa-mutation-author` (either dispatch) | 180s | 4.5 min | `mutants.json` at `status: "designed"` (design before injection) |
+| `qa-e2e-author` | n/a — background, off critical path (CLAUDE.md Phase 7b: never blocks the verdict) | 15 min, informational only — not gated by the run budget; a stall here just means its addendum is missing this run, reported as such | n/a |
+| background shell job (`stryker-run.ps1`, `worktree.ps1 -EnsureBase`) | the script's own `-TimeoutMinutes`/anti-hang valve | that valve + 1 min | the job's own log/output files |
 
 **Procedure for an agent dispatch** (every `Agent` tool call in this skill except
 `qa-e2e-author`):
@@ -110,25 +112,52 @@ below for which applies):
 3. **Timer fires first** → the agent is running long or has stalled:
    a. Stream one status line immediately ("`<agent>` is past its expected time
       (ceiling `<n>`s) — checking on it"). Never go dark.
-   b. `ListAgents` to confirm it's still listed, then `SendMessage` a short nudge
-      ("status check — please report progress or continue") and start a second,
-      short **20s grace timer** the same way — tightened from an initial 45s
-      after live testing (2026-08-25) showed a nudged, genuinely-alive agent
-      engages essentially immediately; 45s was untested caution with no
-      justification once real data existed, and every second of it is dead
-      weight against the 10-min target on a true stall.
-   c. Grace timer fires with still no response → the dispatch is stalled. Check
-      the run budget: if `remaining >= ceiling + 20s + 15s buffer`, re-dispatch a
-      **fresh** `Agent` call (new instance, not a resume of the stalled one — same
-      original inputs; all six agents are idempotent over their workspace inputs)
-      paired with its own new watchdog timer at the same ceiling. If the budget
-      does not allow it, or this is already a retry, stop: don't retry a third
-      time regardless of budget.
-   d. Any stall/retry gets an honest `time-ledger.json` row with the REAL elapsed
-      seconds (never 0, never "not comparable" — see the corrected-ledger rule),
-      labeled `DEGRADED — agent stalled, lane skipped (run-budget)` if given up,
-      or noting the retry if one happened and then succeeded. The report/evidence
-      file must reflect a given-up lane as degraded, never silently missing it.
+   b. **Check the dispatch's checkpoint artifact FIRST** (per-agent, from the
+      table above — existence + last-write time): written or updated since this
+      dispatch started → the agent is demonstrably progressing; extend ONCE by
+      ~60s (a new background timer; at most one extension per dispatch, ever)
+      and skip the nudge. On-disk progress is the ONLY liveness signal this
+      procedure trusts — verified live (GH issue #32, reproduced 2-for-2): a
+      nudged `qa-mutation-author` replied immediately and coherently
+      ("Injecting now — four switches") having written zero bytes, and the
+      lane was still lost; a second run's agent never replied at all with the
+      identical outcome. A chat reply is not evidence of anything.
+   c. No checkpoint progress → `ListAgents` to confirm it's still listed, then
+      `SendMessage` a short nudge ("status check — Write your checkpoint
+      artifact NOW with whatever you have, then continue") and start a second,
+      short **20s grace timer** the same way. When the grace timer fires,
+      re-check the checkpoint artifact: appeared/updated during the grace →
+      treat as (b), one ~60s extension. Still nothing on disk — whether or not
+      the agent replied — the dispatch is stalled; stop it (`TaskStop`). (The
+      20s figure stands from 2026-08-25 live testing — an alive agent engages
+      essentially immediately — but per the above, engaging ≠ progressing:
+      only the artifact re-check decides, never the reply.)
+   d. **Salvage before deciding on a retry** — a checkpoint left by the dead
+      dispatch changes what a retry even is:
+      - `mutants.json` at `status: "designed"` → the design work is safe; the
+        retry is a cheap **inject-only** re-dispatch of `qa-mutation-author`
+        ("`mutants.json` exists at status designed — read it, inject the
+        switches, update the status; do NOT redesign"). If the budget can't
+        even carry that, degrade the lane to `DEGRADED — mutants designed,
+        not executed (agent stalled before injection)` — the designs stay in
+        `mutants.json` and the evidence file says so; never report the tier
+        as if nothing was produced.
+      - `analyst-brief.json` at `status: "partial"` → render from the partial
+        brief with the gap-lattice/flaky sections honestly degraded
+        (`DEGRADED — analysis cut short after checkpoint`), rather than
+        losing the findings/AC grades/questions it already contains.
+      - No checkpoint at all → full fresh re-dispatch (same original inputs;
+        all six agents are idempotent over their workspace inputs), budget
+        permitting: `remaining >= ceiling + 20s + 15s buffer`. If the budget
+        does not allow it, or this is already a retry, stop: don't retry a
+        third time regardless of budget.
+   e. Any stall/extension/retry gets an honest `time-ledger.json` row with the
+      REAL elapsed seconds (never 0, never "not comparable" — see the
+      corrected-ledger rule), labeled `DEGRADED — agent stalled, lane skipped
+      (run-budget)` if given up with nothing salvaged, the specific salvage
+      label from (d) if partially salvaged, or noting the retry if one
+      happened and then succeeded. The report/evidence file must reflect a
+      given-up lane as degraded, never silently missing it.
 
 **Procedure for a background shell job** (`stryker-run.ps1` in step 5,
 `worktree.ps1 -EnsureBase` in step 7): same paired-timer start, but there's no
@@ -309,12 +338,27 @@ phase's result (e.g., mutation results marked not completed this run).
      worktree.ps1 materializes the files into both worktrees), so it doesn't
      depend on any worktree existing.
    - `qa-mutation-author`'s dispatch prompt ALSO carries the same inline pack
-     (ACs, diff hunks, citations) plus the worktree dir's absolute path (where
-     it edits) — never a re-read of `run-manifest.json`/`diff-set.json`. It
-     designs **3–5** mutants now (down from the old 3–8 — prefer fewer,
-     higher-value ones), reading product-repo source only for injection
+     (ACs, diff hunks, citations — including the pack's "Const declarations in
+     the diff" section, which pre-resolves the const → static-property
+     promotion sites so the agent holds less un-written state before its first
+     checkpoint) plus the worktree dir's absolute path (where it edits) — never
+     a re-read of `run-manifest.json`/`diff-set.json`. It designs **up to 3**
+     mutants now (down from 3–5, GH issue #32 — six candidate sites plus
+     promotion surgery was too much state to hold before the first write), and
+     its briefed work order is checkpoint-first: Write `mutants.json` at
+     `status: "designed"` BEFORE any worktree edit, inject, then update to
+     `status: "injected"`. It reads product-repo source only for injection
      mechanics (matching an existing pattern it must reproduce exactly), never
      for general context the pack already gives it.
+   - **Co-dispatch diagnostic (GH issue #32, one-run experiment)**: both
+     reproduced `qa-mutation-author` stalls shared exactly one structural
+     trait — dispatched in the same tool-call batch as `qa-analyst`. On the
+     next real run, dispatch `qa-mutation-author` ALONE, immediately after
+     `qa-analyst`'s completion notification (everything else in this step
+     stays batched as written), and record the outcome in issue #32:
+     completes solo → the batching here needs revisiting for this agent;
+     stalls solo → the cause is its own prompt/workload and the
+     checkpoint/cap fixes are the whole cure. Then delete this bullet.
    - `qa-analyst`'s dispatch prompt MUST carry an inline evidence pack, not just a
      workspace-dir path — this is what keeps it inside its ~10-tool-call budget
      (verified live: without this it took 437s, the single largest phase, largely
@@ -354,7 +398,16 @@ phase's result (e.g., mutation results marked not completed this run).
    `SKIPPED — consent denied` line still apply; skipped under `--quick`) — after
    step 3 has finished (the driver and Stryker are CPU-heavy): design + injection
    may already be done from step 4's early dispatch →
-   `scripts/semantic-mutant-driver.ps1`. In the SAME tool-call batch as the next
+   `scripts/semantic-mutant-driver.ps1`. **The AI tier holds first claim on the
+   remaining run budget at this point** (GH issue #32: CLAUDE.md calls it the
+   core ask and orders it before Stryker, yet in both reproduced stall runs it
+   lost the budget race — once while Stryker cache-hit in 42s, so the window
+   existed and simply wasn't allocated): if step 4's `qa-mutation-author`
+   dispatch stalled but left `mutants.json` at `status: "designed"`, spend the
+   budget on the inject-only salvage re-dispatch (watchdog step 3d) and the
+   driver run BEFORE kicking off Stryker or any other optional work — never
+   the other way around. The driver itself refuses a `status: "designed"` file,
+   so this ordering is also what makes the lane runnable at all. In the SAME tool-call batch as the next
    two steps below (`worktree.ps1 -Ensure` + kicking off Stryker), dispatch
    `qa-mutation-author` again to draft `suggestedFix` entries for whichever of
    ITS OWN mutants the driver just reported as survived — this overlaps

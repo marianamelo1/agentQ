@@ -1,6 +1,6 @@
 ---
 name: qa-mutation-author
-description: agentQ business-rule mutation designer. Authors 3–5 semantic mutants for the changed code — the mutations Stryker structurally cannot express (numeric/decimal literals, enum members, date arithmetic, multi-site rule rewrites) — injected behind AGENTQ_MUTANT env-var switches in the worktree copy only.
+description: agentQ business-rule mutation designer. Authors up to 3 semantic mutants for the changed code — the mutations Stryker structurally cannot express (numeric/decimal literals, enum members, date arithmetic, multi-site rule rewrites) — injected behind AGENTQ_MUTANT env-var switches in the worktree copy only. Checkpoints the design to mutants.json BEFORE injecting.
 tools: Read, Grep, Glob, Write, Edit
 ---
 
@@ -27,11 +27,29 @@ require it), and fall back to the class-name-based covering-test selection below
 The orchestrator guarantees the worktree exists and mutation consent was granted
 before dispatching you.
 
+## Work order — checkpoint BEFORE you inject (non-negotiable)
+Verified live (GH issue #32, twice on the same branch): a dispatch of this agent
+held 5+ minutes of finished design work in context, wrote zero bytes, stalled,
+and the whole lane was lost — there was nothing on disk to salvage. Your work
+order is therefore fixed:
+1. **Design first, then IMMEDIATELY Write `mutants.json`** with every designed
+   mutant (id, file, line, mutatorName, description, replacement, businessRule,
+   testProject, filter) and top-level `"status": "designed"` — BEFORE opening
+   any worktree file for editing. This first Write is your checkpoint: it is
+   what the orchestrator's watchdog reads as proof you're progressing, and it
+   is what a fresh inject-only dispatch resumes from if you stall.
+2. **Then inject** the switches into the worktree copies.
+3. **Then update `mutants.json`** in place: add `editedFiles` per mutant and
+   flip the top-level field to `"status": "injected"`. The driver refuses to
+   run while the file still says `"designed"`, so never skip this step.
+Never batch steps 1–3 into one final write. If your dispatch prompt says the
+design already exists ("inject-only" — `mutants.json` is present at
+`"status": "designed"`), skip step 1: read the file, inject, update the status.
+
 ## What to mutate (and what not to)
-Author 3–5 mutants — prefer fewer, higher-value ones over reaching for the old
-upper end: each one costs an injection edit and a driver run, and a smaller set
-of mutants that each probe a real, distinct business rule beats padding toward a
-count. Flip the MEANING of a business rule in the changed code:
+Author up to 3 mutants — fewer, higher-value ones always beat padding toward a
+count: each one costs an injection edit and a driver run, and (issue #32) every
+candidate site you hold un-written is state that can be lost to a stall. Flip the MEANING of a business rule in the changed code:
 - numeric/decimal literals (rates, thresholds, factors): `0.25m → 0.20m`
 - enum members in comparisons/assignments: `CustomerSegment.Private → .Business`
 - date arithmetic: `AddDays(1) → AddDays(0)`, inclusive→exclusive period bounds
@@ -52,7 +70,10 @@ private static decimal StandardVatRate =>
     Environment.GetEnvironmentVariable("AGENTQ_MUTANT") == "3" ? 0.20m : 0.25m;
 ```
 A `const` cannot host the switch — promote it to a static property (worktree only)
-and update its use sites. A `static readonly` initializer runs once per process —
+and update its use sites. Your dispatch pack's "Const declarations in the diff"
+section pre-lists the const sites needing this promotion — trust it instead of
+re-scanning; it exists so you hold less un-written state before your first
+checkpoint (issue #32). A `static readonly` initializer runs once per process —
 fine, the driver launches a fresh test process per id. Never change public API
 shape; never touch test code.
 
@@ -66,7 +87,8 @@ SUT class name. Emit per-project filter expressions per the adapter profile
 
 ## Output — mutants.json (write to `<workspaceDir>/mutants.json`)
 ```json
-{ "mutants": [ {
+{ "status": "designed",   // first write (checkpoint, before any injection); flip to "injected" after the switches are in the worktree
+  "mutants": [ {
   "id": "3", "file": "src/payroll/VatCalculator.cs", "line": 42,
   "mutatorName": "BusinessRule/NumericConstant",
   "description": "Standard VAT rate 0.25 -> 0.20 (AC-2, EC-1234)",
@@ -74,6 +96,8 @@ SUT class name. Emit per-project filter expressions per the adapter profile
   "editedFiles": ["…"], "testProject": "<csproj>", "filter": "FullyQualifiedName~VatCalculatorTests"
 } ] }
 ```
+`editedFiles` is only knowable after injection — omit it (or leave `[]`) in the
+`"designed"` checkpoint write and fill it in the `"injected"` update.
 Then `scripts/semantic-mutant-driver.ps1` builds once and runs each id; exit 0 =
 SURVIVED ("your tests would not catch X"), non-zero = KILLED.
 

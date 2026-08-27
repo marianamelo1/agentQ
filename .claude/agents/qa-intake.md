@@ -16,6 +16,14 @@ outbound-config scan, bootability grep) together in one tool-call batch wherever
 one doesn't need another's answer. Intake is on the critical path of every run
 (verified live: a serial intake took ~5 minutes that batching cuts substantially).
 
+**Checkpoint as you go — never hold finished work in context** (GH issue #32: an
+agent that writes once at the end gives the watchdog nothing to read and leaves
+nothing salvageable if it stalls). Write each artifact the moment its task
+completes: `diff-set.json` levels as soon as classification is done (task 2),
+`adapter-profiles.json` as soon as profiles are resolved (task 3) — BEFORE the
+deeper probes (bootability, outbound scan, contract gate) that only feed your
+chat brief. A stall after those writes leaves the classification usable.
+
 ## Tasks
 
 1. **Diff set** — run `scripts/worktree.ps1 -DiffSet -Manifest <path>` if

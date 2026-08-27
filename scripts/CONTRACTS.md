@@ -427,6 +427,27 @@ that run's `coverageNote` explaining the skip, and is retried next run.
 Refuse (`refused:true`) when `resolvedFileRatio < 0.8` — never report a number built
 on broken path mapping.
 
+## mutants.json  (qa-mutation-author writes; semantic-mutant-driver.ps1 reads AND updates)
+Full field-by-field shape in `.claude/agents/qa-mutation-author.md`. What binds
+consumers here is the top-level **checkpoint field** (GH issue #32 — agents that
+wrote once at the end were unwatchable and unsalvageable):
+```json
+{ "status": "designed",   // "designed" | "injected" — absent = legacy file, treat as "injected"
+  "mutants": [ { "id": "…", "testProject": "…", "filter": "…", "…": "…" } ] }
+```
+- `"designed"` = the agent's FIRST write, made before any worktree injection:
+  the design is complete and durable, the switches are NOT in the worktree yet.
+  `semantic-mutant-driver.ps1` refuses to run against it (running tests with no
+  injected switches would produce all-Survived noise). A stalled dispatch that
+  got this far is salvageable: re-dispatch inject-only, or report the lane
+  `DEGRADED — mutants designed, not executed`.
+- `"injected"` = switches are in the worktree; the driver may run. The driver
+  then updates each mutant in place with status/killedBy/testsCompleted/
+  durationSeconds (per-mutant `status` is a different field from this top-level
+  one).
+- The file's existence/mtime is the watchdog's progress signal for a
+  `qa-mutation-author` dispatch (SKILL.md watchdog procedure).
+
 ## mutation-report.json  (merge-mutation-reports.ps1 — mutation-testing-elements schema v2)
 Stryker's own JSON plus agentQ semantic mutants merged into the same `files` map, ids
 `agentq-N`, `mutatorName` prefixed `BusinessRule/`. Per-mutant `status`:
@@ -516,6 +537,7 @@ regression-risk findings, AC grades, the gap lattice, static flaky-smell greps,
 Socratic questions, and manual-test-candidate framing.
 ```json
 {
+  "status": "complete",   // "partial" | "complete" — absent = legacy file, treat as complete. See checkpoint note below.
   "findings": [
     {
       "id": 1,
@@ -563,6 +585,17 @@ coverage findings, not mutation findings — one tier per changed line).
 `manualTesting` is populated only when `manual-test-candidates.json` exists
 this run — same file, now with the analyst's one-sentence framing attached
 per candidate instead of a bare title.
+
+**`status` checkpoint (GH issue #32)**: qa-analyst writes this file TWICE —
+first with `"status": "partial"` as soon as `findings`/`acAlignment`/
+`socraticQuestions`/plain fields are composed (they don't depend on the test/
+coverage artifacts), then complete with `"status": "complete"` after
+`gapLattice`/`flakyInterpretation`. The file's existence/mtime is the
+watchdog's progress signal for a `qa-analyst` dispatch. The render scripts may
+be pointed at a `"partial"` brief only when the orchestrator has already
+degraded the analysis lane (agent stalled after its checkpoint) — the evidence
+file must then state that the gap-lattice/flaky sections are missing because
+the analysis was cut short, never render them as silently absent.
 
 ## report-selection.json  (render-report.ps1 — written to the WORKSPACE dir,
 ## next to analyst-brief.json — NOT into reports/, which holds only the two
