@@ -6,11 +6,13 @@
     Reads <workspaceDir>/mutants.json (written by the qa-mutation-author agent).
     All mutant code is ALREADY injected in the worktree behind AGENTQ_MUTANT
     env-var switches, so the flow is:
-      1. ONE build per distinct test project (all mutants share the same binaries
-          -  the env-var switch selects the active mutant at runtime).
+      1. ONE build per distinct .NET test project (all mutants share the same
+         binaries  -  the env-var switch selects the active mutant at runtime).
+         JS/TS projects (testProject resolves to a jest config) need no build.
       2. Baseline sanity: every distinct (testProject, filter) pair must pass with
          NO mutant active.
-      3. One fresh `dotnet test` process per mutant id with AGENTQ_MUTANT set.
+      3. One fresh test process per mutant id with AGENTQ_MUTANT set  -
+         `dotnet test` for .NET mutants, `npx jest` for JS/TS mutants (GH #40).
       4. Update mutants.json in place with status/killedBy/testsCompleted/
          durationSeconds per mutant.
     Exit code 0 means the script ran (findings live in mutants.json); non-zero
@@ -97,6 +99,143 @@ function Read-TrxSummary {
     $failed = @()
     foreach ($r in $trx.GetElementsByTagName('UnitTestResult')) {
         if ($r.GetAttribute('outcome') -eq 'Failed') { $failed += $r.GetAttribute('testName') }
+    }
+    $info.FailedTestNames = $failed
+    return $info
+}
+
+function Get-MutantLanguage {
+    # GH issue #40: a mutant's testProject tells us which execution engine it
+    # needs. qa-mutation-author points .NET mutants at a .csproj (unchanged);
+    # for a JS/TS repo it points at the project's jest config directly, or at
+    # its Nx `project.json`/plain `package.json` descriptor (same convention
+    # run-tests.ps1's Get-JsProjectDir already uses for the unit-test lane) --
+    # verified live against workspace/e-conomic__client/.../mutants.json.
+    # Anything else defaults to 'dotnet' for backward compatibility with every
+    # mutants.json written before this function existed.
+    param([string]$TestProject)
+    if ($TestProject -match '\.csproj$') { return 'dotnet' }
+    if ($TestProject -match 'jest\.config\.(ts|js|cjs|mjs)$') { return 'jest' }
+    if ($TestProject -match '[\\/](project|package)\.json$') { return 'jest' }
+    return 'dotnet'
+}
+
+function Resolve-JestConfigPath {
+    # $TestProjectAbs is either already a jest.config.* file (the common case --
+    # qa-mutation-author resolves it up front), or a project descriptor
+    # (project.json/package.json) sitting next to one. Mirrors run-tests.ps1's
+    # Invoke-JestRelatedRun config-discovery loop so both lanes agree on which
+    # config file a given project uses.
+    param([Parameter(Mandatory = $true)][string]$TestProjectAbs)
+    if ($TestProjectAbs -match 'jest\.config\.(ts|js|cjs|mjs)$') {
+        if (Test-Path -LiteralPath $TestProjectAbs -PathType Leaf) { return $TestProjectAbs }
+        return $null
+    }
+    $dir = Split-Path -Parent $TestProjectAbs
+    foreach ($cand in @('jest.config.ts', 'jest.config.js', 'jest.config.cjs', 'jest.config.mjs')) {
+        $p = Join-Path $dir $cand
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $null
+}
+
+$script:realNodeExe = $null
+function Get-RealNodeExe {
+    # WHY this exists at all (verified live, GH #40 testing on a real Windows repo):
+    # `npx jest --testPathPattern 'A\.(test|agentq\.test)\.tsx$'` -- and even a
+    # DIRECT `node jest.js` call through a node-version-manager's node.exe SHIM
+    # (Volta, reproduced; nvm-windows/fnm use the same category of exe-shim) --
+    # silently mis-executes the moment the regex contains a bare `|`: the shim's
+    # own re-exec into the pinned runtime reforwards argv through a cmd.exe
+    # re-parse, which treats the unquoted `|` as a REAL pipe and splits the
+    # command mid-argument ("'ExpenseStatusBadgeCell' is not recognized as an
+    # internal or external command"). `npx.cmd` batch-file forwarding has the
+    # identical failure mode independent of which vendor's shim it is (verified
+    # against the plain nodejs.org npx.cmd too) -- so avoiding `npx` alone does
+    # not fix this; the bug lives in the SECOND hop, not the first.
+    # Fix: `process.execPath`, read from a TRIVIAL node invocation with zero
+    # special characters (guaranteed to survive any shim), reports the REAL
+    # underlying node.exe the shim re-execs into. Calling THAT path directly for
+    # every later invocation skips the shim's re-exec entirely, so its argv
+    # mangling never has a chance to run (verified live: the exact same regex
+    # that broke via `npx jest`/a shimmed `node` succeeded byte-for-byte once
+    # invoked through the resolved real node.exe). Cached for the whole driver
+    # run; falls back to the bare `node` command if resolution itself fails for
+    # any reason (never worse than the pre-fix behavior).
+    if ($script:realNodeExe) { return $script:realNodeExe }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = (& node -e 'console.log(process.execPath)' 2>$null | Select-Object -Last 1)
+        if ($out) {
+            $candidate = ([string]$out).Trim()
+            if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $script:realNodeExe = $candidate }
+        }
+    } catch { }
+    finally { $ErrorActionPreference = $prev }
+    if (-not $script:realNodeExe) { $script:realNodeExe = 'node' }
+    return $script:realNodeExe
+}
+
+function Resolve-JestCliEntry {
+    # jest's actual CLI entry script, resolved from node_modules directly --
+    # never `npx jest` (see Get-RealNodeExe: the `npx.cmd` batch-file hop has the
+    # identical argv-mangling failure mode). Checked at the project dir first
+    # (per-package node_modules), then the worktree root (Nx/workspace hoisting).
+    param([Parameter(Mandatory = $true)][string]$ProjDirAbs, [Parameter(Mandatory = $true)][string]$WorktreeDirAbs)
+    foreach ($base in @($ProjDirAbs, $WorktreeDirAbs)) {
+        $candidate = Join-Path $base 'node_modules/jest/bin/jest.js'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+function Invoke-NodeScript {
+    # Same EAP dance as Invoke-Dotnet, plus CI/FORCE_COLOR pinned the same way
+    # run-tests.ps1's Invoke-JestRelatedRun pins them -- a colorized/interactive
+    # jest reporter would otherwise pollute the JSON-parsed log and, on some
+    # terminals, block on a TTY probe. Always the REAL node.exe (Get-RealNodeExe),
+    # never `npx`/a shimmed `node` on PATH -- see Get-RealNodeExe for why.
+    param([string[]]$ArgumentList, [string]$WorkingDirectory)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $prevCi = $env:CI; $prevForceColor = $env:FORCE_COLOR
+    $env:CI = 'true'; $env:FORCE_COLOR = '0'
+    try {
+        Push-Location -LiteralPath $WorkingDirectory
+        try {
+            $lines = @(& (Get-RealNodeExe) @ArgumentList 2>&1 | ForEach-Object { $_.ToString() })
+            $code = $LASTEXITCODE   # checked explicitly  -  never infer from $?
+        }
+        finally { Pop-Location }
+    }
+    finally {
+        $ErrorActionPreference = $prev
+        $env:CI = $prevCi; $env:FORCE_COLOR = $prevForceColor
+    }
+    return [pscustomobject]@{
+        ExitCode = $code
+        Output   = ($lines -join [Environment]::NewLine)
+    }
+}
+
+function Read-JestSummary {
+    # Minimal jest --json read: executed/failed counts + failed test full names.
+    # Mirrors the shape Invoke-JestRelatedRun already parses in run-tests.ps1 so
+    # both lanes read the exact same jest JSON contract.
+    param([string]$ResultsFile)
+    $info = [pscustomobject]@{ Exists = $false; Executed = 0; Failed = 0; FailedTestNames = @() }
+    if (-not (Test-Path -LiteralPath $ResultsFile)) { return $info }
+    try { $jr = Get-Content -LiteralPath $ResultsFile -Raw | ConvertFrom-Json }
+    catch { return $info }   # unreadable/partial JSON == no evidence; caller treats as missing
+    $info.Exists = $true
+    $info.Executed = [int](Get-Prop $jr 'numTotalTests' 0)
+    $info.Failed = [int](Get-Prop $jr 'numFailedTests' 0)
+    $failed = @()
+    foreach ($tr in @(Get-Prop $jr 'testResults' @())) {
+        foreach ($ar in @(Get-Prop $tr 'assertionResults' @())) {
+            if ([string](Get-Prop $ar 'status' '') -eq 'failed') { $failed += [string](Get-Prop $ar 'fullName' '') }
+        }
     }
     $info.FailedTestNames = $failed
     return $info
@@ -295,14 +434,26 @@ foreach ($m in $mutants) {
     $runnable += ,$m
 }
 
+# Language routing (GH issue #40): every mutant resolves to 'dotnet' or 'jest'
+# off its own testProject path, keyed once here so the build/baseline/run steps
+# below never re-derive it.
+$projLang = @{}
+foreach ($m in $runnable) {
+    $proj = Resolve-TestProjectPath (Get-Prop $m 'testProject')
+    if (-not $projLang.ContainsKey($proj)) { $projLang[$proj] = Get-MutantLanguage (Get-Prop $m 'testProject') }
+}
+
 # ---------------------------------------------------------------------------
-# Step 1  -  ONE build per distinct test project
+# Step 1  -  ONE build per distinct .NET test project
 # WHY one build: every mutant is already injected behind its env-var switch, so
 # a single set of binaries serves all of them; rebuilding per mutant would
-# multiply the phase time for nothing.
+# multiply the phase time for nothing. Jest projects need no separate build
+# step -- jest runs straight from source (ts-jest/babel transform at run time),
+# same as run-tests.ps1's JS lane.
 # ---------------------------------------------------------------------------
 
-$distinctProjects = @($runnable | ForEach-Object { Resolve-TestProjectPath (Get-Prop $_ 'testProject') } | Sort-Object -Unique)
+$distinctProjects = @($runnable | ForEach-Object { Resolve-TestProjectPath (Get-Prop $_ 'testProject') } |
+    Where-Object { $projLang[$_] -eq 'dotnet' } | Sort-Object -Unique)
 $buildFailed = @{}
 
 foreach ($proj in $distinctProjects) {
@@ -354,7 +505,9 @@ if ($buildFailed.Count -gt 0) {
 # verdict on that filter would be noise.
 # ---------------------------------------------------------------------------
 
-$baseline = @{}   # "<proj>|<filter>" -> 'pass' | 'zero' | 'broken'
+$baseline = @{}    # "<proj>|<filter>" -> 'pass' | 'zero' | 'broken' | 'configMissing'
+$jestConfigByProj = @{}   # resolved jest.config.* path per distinct jest testProject
+$jestCliEntryByProj = @{}   # resolved node_modules/jest/bin/jest.js path per distinct jest testProject
 $baselineIndex = 0
 
 foreach ($m in $runnable) {
@@ -362,6 +515,46 @@ foreach ($m in $runnable) {
     $filter = Get-Prop $m 'filter'
     $key    = "$proj|$filter"
     if ($baseline.ContainsKey($key)) { continue }
+
+    if ($projLang[$proj] -eq 'jest') {
+        if (-not $jestConfigByProj.ContainsKey($proj)) { $jestConfigByProj[$proj] = Resolve-JestConfigPath -TestProjectAbs $proj }
+        $jestConfig = $jestConfigByProj[$proj]
+        if ($jestConfig -and -not $jestCliEntryByProj.ContainsKey($proj)) {
+            $jestCliEntryByProj[$proj] = Resolve-JestCliEntry -ProjDirAbs (Split-Path -Parent $jestConfig) -WorktreeDirAbs $worktreeDir
+        }
+        $jestCliEntry = $jestCliEntryByProj[$proj]
+        if (-not $jestConfig -or -not $jestCliEntry) {
+            # WHY 'configMissing' as its own baseline status: cannot even attempt a
+            # run (no config, or no resolvable jest CLI entry under node_modules),
+            # so this must never fall into 'broken' (which claims the injection
+            # broke real tests) or 'zero' (which claims a filter matched nothing).
+            $baseline[$key] = 'configMissing'
+            continue
+        }
+
+        $baselineIndex++
+        $resultsFile = Join-Path $evidenceDir "jest-baseline-$baselineIndex.json"
+        if (Test-Path -LiteralPath $resultsFile) { Remove-Item -LiteralPath $resultsFile -Force }
+
+        Write-Verbose "Baseline (jest): $filter ($proj)"
+        $res = Invoke-NodeScript -WorkingDirectory $worktreeDir -ArgumentList @(
+            $jestCliEntry, '--config', $jestConfig, '--ci', '--silent', '--json',
+            "--outputFile=$resultsFile", '--testPathPattern', $filter, '--passWithNoTests'
+        )
+        Write-Utf8NoBom -Path (Join-Path $evidenceDir "baseline-$baselineIndex.log") -Content $res.Output
+        $js = Read-JestSummary -ResultsFile $resultsFile
+
+        if ($res.ExitCode -eq 0 -and $js.Executed -eq 0) {
+            $baseline[$key] = 'zero'
+        }
+        elseif ($res.ExitCode -eq 0 -and $js.Failed -eq 0) {
+            $baseline[$key] = 'pass'
+        }
+        else {
+            $baseline[$key] = 'broken'
+        }
+        continue
+    }
 
     $baselineIndex++
     $trxName = "agentq-baseline-$baselineIndex.trx"
@@ -431,12 +624,49 @@ foreach ($m in $runnable) {
             -DurationSeconds 0 -Reason "baseline run of '$filter' failed with no mutant active  -  injection broke behavior; a survived verdict is only meaningful against a green baseline"
         continue
     }
+    elseif ($baseline[$key] -eq 'configMissing') {
+        # jest-only: testProject didn't resolve to a real jest.config.* file, or
+        # node_modules/jest/bin/jest.js wasn't found under it -- never a
+        # CompileError (no build step exists to have failed) and never Survived
+        # (zero evidence either way).
+        Set-MutantResult -Mutant $m -Status 'Ignored' -KilledBy @() -TestsCompleted 0 `
+            -DurationSeconds 0 -Reason "could not resolve a jest config or jest CLI entry for testProject '$(Get-Prop $m 'testProject')'  -  mutant never ran"
+        continue
+    }
 
+    $lang    = $projLang[$proj]
     $safeId  = ($id -replace '[^\w\-\.]', '_')
+    $logPath = Join-Path $evidenceDir "run-$safeId.log"
+
+    if ($lang -eq 'jest') {
+        $jestConfig = $jestConfigByProj[$proj]
+        $jestCliEntry = $jestCliEntryByProj[$proj]
+        $realNode = Get-RealNodeExe
+        $resultsFile = Join-Path $evidenceDir "jest-$safeId.json"
+        if (Test-Path -LiteralPath $resultsFile) { Remove-Item -LiteralPath $resultsFile -Force }
+
+        # Same per-process env-var switch mechanism as the .NET branch below --
+        # AGENTQ_MUTANT scoped to just this command, never $env: (script-global).
+        # NEVER `npx jest` here (see Get-RealNodeExe): the resolved REAL node.exe
+        # calling jest's CLI entry directly is what survives a `|`-bearing filter
+        # on Windows.
+        if ($script:IsWin) {
+            $line = "set AGENTQ_MUTANT=$id&& set CI=true&& set FORCE_COLOR=0&& `"$realNode`" `"$jestCliEntry`" --config `"$jestConfig`" --ci --silent --json --outputFile=`"$resultsFile`" --testPathPattern `"$filter`" --passWithNoTests 1>`"$logPath`" 2>&1"
+        } else {
+            $line = "AGENTQ_MUTANT=$id CI=true FORCE_COLOR=0 `"$realNode`" `"$jestCliEntry`" --config `"$jestConfig`" --ci --silent --json --outputFile=`"$resultsFile`" --testPathPattern `"$filter`" --passWithNoTests > `"$logPath`" 2>&1"
+        }
+        $null = $mutantSpecs.Add(@{
+            M = $m; Id = $id; Filter = $filter; Language = 'jest'; TrxPath = $null; ResultsFile = $resultsFile; LogPath = $logPath
+            CmdLine = $line
+            Boots = $false   # jest tests never boot a WebApplicationFactory
+            Proc = $null; Sw = $null; Seconds = 0.0; TimedOut = $false
+        })
+        continue
+    }
+
     $trxName = "agentq-$safeId.trx"
     $trxPath = Join-Path $evidenceDir $trxName
     if (Test-Path -LiteralPath $trxPath) { Remove-Item -LiteralPath $trxPath -Force }
-    $logPath = Join-Path $evidenceDir "run-$safeId.log"
 
     # One shell wrapper per mutant: sets the switch for THAT process tree only and
     # file-redirects all output (no PS stream pumping, no drain deadlock). Two
@@ -452,7 +682,7 @@ foreach ($m in $runnable) {
         $line = "AGENTQ_MUTANT=$id dotnet test `"$proj`" --no-build -c Debug --filter `"$filter`" --logger `"trx;LogFileName=$trxName`" --results-directory `"$evidenceDir`" -- RunConfiguration.TreatNoTestsAsError=true > `"$logPath`" 2>&1"
     }
     $null = $mutantSpecs.Add(@{
-        M = $m; Id = $id; Filter = $filter; TrxPath = $trxPath; LogPath = $logPath
+        M = $m; Id = $id; Filter = $filter; Language = 'dotnet'; TrxPath = $trxPath; ResultsFile = $null; LogPath = $logPath
         CmdLine = $line
         Boots = (Test-BootsWebFactory -ProjAbs $proj)
         Proc = $null; Sw = $null; Seconds = 0.0; TimedOut = $false
@@ -536,7 +766,11 @@ foreach ($spec in $mutantSpecs) {
     if (Test-Path -LiteralPath $spec.LogPath) {
         try { $outText = [System.IO.File]::ReadAllText($spec.LogPath) } catch { $outText = '' }
     }
-    $trx = Read-TrxSummary -TrxPath $spec.TrxPath
+    if ($spec.Language -eq 'jest') {
+        $trx = Read-JestSummary -ResultsFile $spec.ResultsFile
+    } else {
+        $trx = Read-TrxSummary -TrxPath $spec.TrxPath
+    }
     $secs = $spec.Seconds
     $exit = [int]$spec.ExitCode
 
@@ -569,10 +803,11 @@ foreach ($spec in $mutantSpecs) {
         $killedBy = @($trx.FailedTestNames)
         $reason = $null
         if ($killedBy.Count -eq 0) {
-            # Non-zero exit but no failed tests in the TRX (or no TRX): the test
-            # host crashed under the mutant. Still a detection  -  CI would go red
-            # the same way  -  but say so instead of naming phantom tests.
-            $reason = 'test process exited non-zero without failed tests in TRX (host crash under mutant  -  treated as detected)'
+            # Non-zero exit but no failed tests in the results (TRX or jest JSON,
+            # or neither written at all): the test host crashed under the mutant.
+            # Still a detection  -  CI would go red the same way  -  but say so
+            # instead of naming phantom tests.
+            $reason = 'test process exited non-zero without failed tests in the results (host crash under mutant  -  treated as detected)'
         }
         Set-MutantResult -Mutant $m -Status 'Killed' -KilledBy $killedBy -TestsCompleted $trx.Executed `
             -DurationSeconds $secs -Reason $reason

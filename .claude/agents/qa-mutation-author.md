@@ -85,6 +85,15 @@ method per `diff-coverage.json` gaps/methods, else the whole test class matching
 SUT class name. Emit per-project filter expressions per the adapter profile
 (class-level `FullyQualifiedName~` terms — command-length-safe).
 
+For a JS/TS repo (adapter profile framework `jest`/`vitest`), `semantic-mutant-driver.ps1`
+(GH #40) tells a JS mutant apart from a .NET one purely from `testProject`'s shape —
+point it at the covering test project's `jest.config.(ts|js|cjs|mjs)` path (resolve it the
+same way `adapter-profiles.json` resolves the project's config; the project's own
+`project.json`/`package.json` descriptor path also works, the driver finds the sibling
+jest config itself), never at a `.csproj`. `filter` is a regex passed to jest's
+`--testPathPattern` — the covering spec file(s), e.g.
+`RegistrationStatusBadgeCell\\.(test|agentq\\.test)\\.tsx$` — not a `FullyQualifiedName~` term.
+
 ## Output — mutants.json (write to `<workspaceDir>/mutants.json`)
 ```json
 { "status": "designed",   // first write (checkpoint, before any injection); flip to "injected" after the switches are in the worktree
