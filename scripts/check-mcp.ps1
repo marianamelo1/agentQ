@@ -154,6 +154,61 @@ if ((Test-Path $pwCache) -and @(Get-ChildItem $pwCache -Directory -ErrorAction S
     Write-Host "[missing] Playwright browsers - E2E lane (frontend repos) only; setup-mcp.ps1 installs them when a registered repo declares @playwright/test" -ForegroundColor Yellow
 }
 
+# --- static lint: @(List[object]) double-wrap crash (GH issue #30) -----------------
+# On this project's PowerShell builds (verified on both 5.1 and 7.6.5), wrapping
+# a New-Object-constructed List[object] variable directly in @() throws
+# "ArgumentException: Argument types do not match" - reproduced multiple times
+# live (impact-index.ps1:467, fixed in GH #31; audited project-wide in GH #30).
+# The trigger is narrow and confirmed empirically: New-Object + the [object]
+# type argument specifically (List[string] etc. via New-Object is fine, and
+# piping a List[object] through Where-Object/ForEach-Object before @() is also
+# fine - only a BARE @($sameVar) on the New-Object-constructed variable itself
+# is dangerous). This is why the check below is a co-occurrence check (does
+# the SAME variable get both New-Object-constructed as List[object] AND later
+# @()-wrapped bare in this file), not a blanket ban on the idiom itself - plain
+# New-Object List[object] with no @() wrap is this repo's normal, accepted
+# list-building convention (CLAUDE.md) and must not be flagged.
+Write-Host ""
+$scriptsDirForLint = Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts'
+$listObjectDeclPattern = '\$(?<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*New-Object\s+[\x27"]?System\.Collections\.Generic\.List\[object\][\x27"]?'
+$listObjectViolations = New-Object System.Collections.Generic.List[object]
+foreach ($lintFile in (Get-ChildItem -Path $scriptsDirForLint -Filter '*.ps1' -File)) {
+    $lintRaw = Get-Content -LiteralPath $lintFile.FullName -Raw
+    if ([string]::IsNullOrEmpty($lintRaw)) { continue }
+    # Blank out comment text (line AND block comments) before matching -
+    # otherwise a comment merely DESCRIBING the bug (this repo has several,
+    # e.g. test-inventory.ps1's "WHY $entries directly, NOT @($entries)")
+    # reads as a live violation. Newlines are preserved so line numbers below
+    # stay accurate; [ref]$null discards parse errors - a script with a real
+    # syntax error still gets scanned on a best-effort token set.
+    $lintChars = $lintRaw.ToCharArray()
+    $lintTokens = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($lintFile.FullName, [ref]$lintTokens, [ref]$null)
+    foreach ($tok in $lintTokens) {
+        if ($tok.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment) {
+            for ($i = $tok.Extent.StartOffset; $i -lt $tok.Extent.EndOffset -and $i -lt $lintChars.Length; $i++) {
+                if ($lintChars[$i] -ne "`n") { $lintChars[$i] = ' ' }
+            }
+        }
+    }
+    $lintText = -join $lintChars
+    foreach ($declMatch in [regex]::Matches($lintText, $listObjectDeclPattern)) {
+        $varName = $declMatch.Groups['var'].Value
+        $wrapPattern = '@\(\s*\$' + [regex]::Escape($varName) + '\s*\)'
+        if ([regex]::IsMatch($lintText, $wrapPattern)) {
+            $declLine = ($lintText.Substring(0, $declMatch.Index) -split "`n").Length
+            $listObjectViolations.Add([pscustomobject]@{ File = $lintFile.Name; Variable = $varName; DeclLine = $declLine })
+        }
+    }
+}
+if ($listObjectViolations.Count -eq 0) {
+    Write-Host "[ok] no @(<New-Object List[object]>) direct-wrap crash pattern in scripts/*.ps1 (GH issue #30)" -ForegroundColor Green
+} else {
+    foreach ($violation in $listObjectViolations) {
+        Write-Host ('[fail] {0}:{1} - ${2} is a New-Object List[object] later wrapped directly in @(${2}) - throws ArgumentException on this PS build (GH issue #30). Use .ToArray() or a leading comma (,${2}) instead.' -f $violation.File, $violation.DeclLine, $violation.Variable) -ForegroundColor Red
+    }
+}
+
 # --- MCP servers declared in .mcp.json ---------------------------------------------
 
 Write-Host ""
