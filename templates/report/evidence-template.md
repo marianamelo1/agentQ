@@ -120,11 +120,11 @@ the plain-language summary live there.
 ## Unit level
 
 <!-- From test-results.json + diff-coverage.json (mechanical) +
-     analyst-brief.json's gapLattice (judgment: missing test / missing case /
-     assertion too weak). Diff coverage phrasing is mandatory: "Of the lines
-     you changed, X% ran under tests related to this branch (branch coverage
-     Y%)". If diff-coverage.json has refused:true — state the refusal reason,
-     no number.
+     gap-lattice.json (mechanical, written by risk-score.ps1 — GH issue #26:
+     missing test / missing case / assertion too weak). Diff coverage phrasing
+     is mandatory: "Of the lines you changed, X% ran under tests related to
+     this branch (branch coverage Y%)". If diff-coverage.json has
+     refused:true — state the refusal reason, no number.
      Test lists: three named lists ONLY — "most likely to catch a regression
      here" (risk-score.json's own topTests, verbatim) / "flaky-risk smells
      (static)" (analyst-brief.json's flakyInterpretation.staticSmells) /
@@ -147,8 +147,9 @@ the plain-language summary live there.
      THIS CHANGE kills it" — never "no test in the project". A fromCache:true
      run states its verdicts were reused from an identical prior run, not
      re-executed. Suppress NoCoverage mutants (they are coverage
-     findings and belong in the Unit section). Name the assert to strengthen
-     when known. If a surviving agentq-N mutant carries a suggestedFix, end
+     findings and belong in the Unit section). Name the test covering it when
+     resolvable (gap-lattice.json's coveringTest, GH issue #26). If a
+     surviving agentq-N mutant carries a suggestedFix, end
      that finding with: "🧪 Generated fix: strengthens `{{testFile}}`. See
      'Generated scenarios' below." A survivor with no suggestedFix (including
      every Stryker mechanical survivor) just keeps the verbal "→ strengthen

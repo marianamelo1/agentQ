@@ -487,7 +487,13 @@ phase's result (e.g., mutation results marked not completed this run).
    merge's output file) with zero judgment in between, so there is no reason
    to spend two round-trips on it. Stream survivors as they land.
 6. **Risk score** — `scripts/risk-score.ps1` (the contract signal already exists
-   from step 2 on committed-spec/ocelot repos — no recompute needed later).
+   from step 2 on committed-spec/ocelot repos — no recompute needed later). Same
+   invocation also writes `gap-lattice.json` (GH issue #26): the script already
+   loads `diff-coverage.json`/`mutation-report.json`/`mutants.json` for its own
+   signals, and only ever runs here — after step 5's mutation merge — so this is
+   what makes the evidence file's gap lattice mechanical and timing-proof,
+   replacing qa-analyst's own (unreliable, race-prone) `gapLattice` as its
+   source. No separate script, no extra step.
 7. **Execution** (consent already answered in step 2, per
    `toggles.executionConsent` literally — never a judgment call to bypass;
    skipped under `--quick`): E2E additionally needs the dev-stack health check to
