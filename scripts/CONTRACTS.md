@@ -475,6 +475,12 @@ wrote once at the end were unwatchable and unsalvageable):
   then updates each mutant in place with status/killedBy/testsCompleted/
   durationSeconds (per-mutant `status` is a different field from this top-level
   one).
+- `testProject`/`filter` also carry the driver's language routing (GH #40): a
+  `.csproj` path → `dotnet test --filter <filter>`; a `jest.config.(ts|js|cjs|mjs)`
+  path (or a `project.json`/`package.json` descriptor next to one) → `npx jest
+  --testPathPattern <filter>`, `filter` then being a regex over spec file paths,
+  not a `FullyQualifiedName~` term. Same `AGENTQ_MUTANT` per-process env-var
+  switch mechanism either way.
 - The file's existence/mtime is the watchdog's progress signal for a
   `qa-mutation-author` dispatch (SKILL.md watchdog procedure).
 
