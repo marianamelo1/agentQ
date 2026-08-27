@@ -1,6 +1,8 @@
 <#
 .SYNOPSIS
     Phase 6  -  deterministic merge-risk score. Writes risk-score.json per scripts/CONTRACTS.md.
+    Also writes gap-lattice.json (GH issue #26): a second, unrelated-but-cheap output that
+    reuses the diff-coverage.json/mutation-report.json/mutants.json this script already loads.
 
 .DESCRIPTION
     WHY THIS IS A SCRIPT, NOT AN AGENT: an LLM computing a weighted sum returns different
@@ -14,6 +16,14 @@
       weights RENORMALIZE. WHY never score a missing signal as 0: substituting zero fakes
       a low-risk verdict off absent evidence  -  the exact dishonesty this tool exists to
       prevent. Missing evidence lowers stated confidence instead.
+
+    GH issue #26: qa-analyst (Phase 4) used to compose analyst-brief.json's gapLattice from
+    diff-coverage.json + mutation-report.json, but mutation-report.json is only written here,
+    in Phase 5/6, strictly after qa-analyst's own dispatch window  -  so the "assertion too
+    weak" tier came back empty on every live run. Since this script already loads both inputs
+    for its own signals (s2 below) and only ever runs after the mutation merge, composing the
+    lattice HERE instead makes it mechanical and timing-proof; see the gap-lattice.json section
+    near the bottom of this file and scripts/CONTRACTS.md.
 
     Exit code 0 = the script ran (even if the score is terrible  -  findings live in the
     JSON artifact). Non-zero = the script itself could not do its job.
@@ -650,3 +660,157 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $overrideText = 'none'
 if ($null -ne $hardOverride) { $overrideText = $hardOverride }
 Write-Output ("risk-score: score={0} band={1} override={2} confidence={3} missingSignals={4} -> {5}" -f $score, $band, $overrideText, $confidence, $missing.Count, $outPath)
+
+# ---------------------------------------------------------------------------------------
+# Write gap-lattice.json (GH issue #26) -- reuses $diffCov / $mut / $mutantsRaw already
+# loaded above for the score's own signals. One tier per changed line, no double counting:
+#   diff-coverage "uncovered"      -> "missing test"
+#   diff-coverage "partial-branch" -> "missing case"
+#   mutation-report Survived mutant (never NoCoverage -- that's a coverage finding, per
+#   merge-mutation-reports.ps1's own header rule) -> "assertion too weak", which SUPERSEDES
+#   any tier-1 entry already recorded at the same file:line (mutation is scoped to
+#   changed-but-covered regions, so a real collision should be rare, but the merge still
+#   enforces "supersedes, never both" rather than assuming that).
+# ---------------------------------------------------------------------------------------
+
+$latticeByKey = @{}   # "file|line" -> entry (PSCustomObject); re-sorted into an array below
+
+$diffCoverageStatus = 'SKIPPED — no diff-coverage.json this run'
+if ($null -ne $diffCov) {
+    if ([bool](Get-Prop $diffCov 'refused' $false)) {
+        $diffCoverageStatus = 'DEGRADED — ' + [string](Get-Prop $diffCov 'refusalReason' '')
+    } else {
+        $diffCoverageStatus = 'OK'
+        foreach ($gap in @(Get-Prop $diffCov 'gaps' @())) {
+            $gFile = [string](Get-Prop $gap 'file' '')
+            $gLineRaw = Get-Prop $gap 'line' $null
+            if ([string]::IsNullOrWhiteSpace($gFile) -or $null -eq $gLineRaw) { continue }
+            $gKind = [string](Get-Prop $gap 'kind' '')
+            $key = "$gFile|$gLineRaw"
+            if ($gKind -eq 'uncovered') {
+                $latticeByKey[$key] = [pscustomobject]@{
+                    kind = 'missing test'; file = $gFile; line = [int]$gLineRaw
+                    detail = 'no test currently covers this changed line'
+                    coveringTest = $null
+                }
+            } elseif ($gKind -eq 'partial-branch') {
+                $cc = [string](Get-Prop $gap 'conditionCoverage' '')
+                $method = [string](Get-Prop $gap 'enclosingMethod' '')
+                $detail = if ($method) { "branch coverage $cc in $method — one arm never runs under test" }
+                          else { "branch coverage $cc — one arm never runs under test" }
+                $latticeByKey[$key] = [pscustomobject]@{
+                    kind = 'missing case'; file = $gFile; line = [int]$gLineRaw
+                    detail = $detail
+                    coveringTest = $null
+                }
+            }
+        }
+    }
+}
+
+$mutationStatus = 'SKIPPED — mutation not run this run'
+if ($null -ne $mut) {
+    $mutationStatus = 'OK'
+
+    # testId -> name, from mutation-report.json's own testFiles{} -- the inverse of the
+    # name -> id map merge-mutation-reports.ps1 builds while merging.
+    $testIdToName = @{}
+    $testFilesMapForLattice = Get-Prop $mut 'testFiles'
+    if ($null -ne $testFilesMapForLattice) {
+        foreach ($tfProp in $testFilesMapForLattice.PSObject.Properties) {
+            foreach ($t in @(Get-Prop $tfProp.Value 'tests' @())) {
+                $tid = [string](Get-Prop $t 'id' '')
+                $tname = [string](Get-Prop $t 'name' '')
+                if ($tid -ne '' -and $tname -ne '' -and -not $testIdToName.ContainsKey($tid)) {
+                    $testIdToName[$tid] = $tname
+                }
+            }
+        }
+    }
+
+    # bare numeric id (no "agentq-" prefix) -> filter, from mutants.json -- the only
+    # covering-test signal a semantic mutant carries once merged, since
+    # merge-mutation-reports.ps1 does not copy coveredBy over for them.
+    $semanticFilterById = @{}
+    if ($null -ne $mutantsRaw) {
+        foreach ($sm in @(Get-Prop $mutantsRaw 'mutants' @())) {
+            $smId = [string](Get-Prop $sm 'id' '')
+            $smFilter = [string](Get-Prop $sm 'filter' '')
+            if ($smId -ne '' -and $smFilter -ne '') { $semanticFilterById[$smId] = $smFilter }
+        }
+    }
+
+    $filesMapForLattice = Get-Prop $mut 'files'
+    if ($null -ne $filesMapForLattice) {
+        foreach ($fp in $filesMapForLattice.PSObject.Properties) {
+            $fFile = $fp.Name
+            foreach ($m in @(Get-Prop $fp.Value 'mutants' @())) {
+                # Every Survived mutant counts here -- mechanical and semantic alike --
+                # unlike s2 above, which only tracks BusinessRule/-prefixed ones for the
+                # score. NoCoverage is suppressed: it never ran, so it is a coverage
+                # finding (tier 1 above), not a mutation finding.
+                if ([string](Get-Prop $m 'status' '') -ne 'Survived') { continue }
+                $loc = Get-Prop $m 'location'
+                $start = Get-Prop $loc 'start'
+                $mLineRaw = Get-Prop $start 'line' $null
+                if ($null -eq $mLineRaw) { continue }
+
+                $coveringTest = $null
+                $coveredBy = @(Get-Prop $m 'coveredBy' @())
+                if (@($coveredBy).Count -gt 0) {
+                    $names = @($coveredBy | ForEach-Object { $testIdToName[[string]$_] } | Where-Object { $_ } | Select-Object -Unique)
+                    if (@($names).Count -gt 0) { $coveringTest = ($names -join ', ') }
+                }
+                $mId = [string](Get-Prop $m 'id' '')
+                if ($null -eq $coveringTest -and $mId.StartsWith('agentq-')) {
+                    $bareId = $mId.Substring(7)
+                    if ($semanticFilterById.ContainsKey($bareId)) {
+                        # Plain text, no markdown -- this is a JSON data artifact, not a
+                        # rendered string; render-evidence.ps1 wraps it in backticks itself.
+                        $coveringTest = "test class matching $($semanticFilterById[$bareId])"
+                    }
+                }
+
+                $mutatorName = [string](Get-Prop $m 'mutatorName' '')
+                $desc = [string](Get-Prop $m 'description' '')
+                if ([string]::IsNullOrWhiteSpace($desc)) {
+                    # Stryker's own mechanical mutants frequently leave description empty --
+                    # fall back to the mutated replacement code, same convention
+                    # render-evidence.ps1's Build-MutationLevel already uses.
+                    $repl = [string](Get-Prop $m 'replacement' '')
+                    $desc = if ($repl) { "mutated to: ``$repl``" } else { '(no description available)' }
+                }
+                $detail = if ($mutatorName) { "$mutatorName — $desc" } else { $desc }
+
+                $key = "$fFile|$mLineRaw"
+                $latticeByKey[$key] = [pscustomobject]@{
+                    kind = 'assertion too weak'; file = $fFile; line = [int]$mLineRaw
+                    detail = $detail
+                    coveringTest = $coveringTest
+                }
+            }
+        }
+    }
+}
+
+# Ordinal file/line sort -- same "byte-identical artifact" determinism contract every
+# script in this repo follows.
+$latticeEntries = @($latticeByKey.Values | Sort-Object -Property 'file', 'line')
+
+$latticeDoc = [ordered]@{
+    diffCoverageStatus = $diffCoverageStatus
+    mutationStatus     = $mutationStatus
+    entries            = $latticeEntries
+}
+
+$latticeOutPath = Join-Path $workspaceDir 'gap-lattice.json'
+$latticeJson = ConvertTo-Json -InputObject $latticeDoc -Depth 12
+[System.IO.File]::WriteAllText($latticeOutPath, $latticeJson, $utf8NoBom)
+
+$latticeCounts = @{ 'missing test' = 0; 'missing case' = 0; 'assertion too weak' = 0 }
+foreach ($e in $latticeEntries) {
+    $k = [string]$e.kind
+    if ($latticeCounts.ContainsKey($k)) { $latticeCounts[$k]++ }
+}
+Write-Output ("gap-lattice: {0} missing test + {1} missing case + {2} assertion too weak (diffCoverage={3}, mutation={4}) -> {5}" -f `
+    $latticeCounts['missing test'], $latticeCounts['missing case'], $latticeCounts['assertion too weak'], $diffCoverageStatus, $mutationStatus, $latticeOutPath)

@@ -15,12 +15,21 @@
     same input bytes produce the same output bytes every time (unlike an agent).
 
     The only genuine JUDGMENT this file needs (regression-risk findings, AC
-    grades, the gap lattice, static flaky-smell hits, Socratic questions,
-    manual-test framing) comes from analyst-brief.json, written by qa-analyst -
-    this script renders that content verbatim, it never invents or re-derives it.
-    Which <=3 findings/questions made the MAIN report (so the evidence file's
-    "Finding detail" section shares the exact same numbering) comes from
+    grades, static flaky-smell hits, Socratic questions, manual-test framing)
+    comes from analyst-brief.json, written by qa-analyst - this script renders
+    that content verbatim, it never invents or re-derives it. Which <=3
+    findings/questions made the MAIN report (so the evidence file's "Finding
+    detail" section shares the exact same numbering) comes from
     report-selection.json, written by qa-report-synthesizer.
+
+    The gap lattice is the one exception (GH issue #26): it used to be part of
+    analyst-brief.json's judgment, but qa-analyst (Phase 4) reliably finished
+    before mutation-report.json existed (written in Phase 5/6), so the
+    "assertion too weak" tier came back empty on every live run. It is now
+    fully mechanical - gap-lattice.json, written by risk-score.ps1 from
+    diff-coverage.json + mutation-report.json (both already loaded there for
+    its own signals) - so it is only ever computed once both inputs genuinely
+    exist. Rendered below, never re-derived here either.
 
     Known simplifications (documented here rather than silently guessed at):
       - Component vs API+Contract rows both read test-results-generated-*.json's
@@ -195,6 +204,7 @@ $testResultsGenBase   = Read-JsonOrNull (Join-Path $workspaceDir 'test-results-g
 $diffCoverage     = Read-JsonOrNull (Join-Path $workspaceDir 'diff-coverage.json')
 $mutationReport   = Read-JsonOrNull (Join-Path $workspaceDir 'mutation-report.json')
 $mutants          = Read-JsonOrNull (Join-Path $workspaceDir 'mutants.json')
+$gapLattice       = Read-JsonOrNull (Join-Path $workspaceDir 'gap-lattice.json')
 $strykerSummary   = Read-JsonOrNull (Join-Path (Join-Path $workspaceDir 'stryker') 'summary.json')
 $contractReport   = Read-JsonOrNull (Join-Path $workspaceDir 'contract-report.json')
 $riskScore        = Read-JsonOrNull (Join-Path $workspaceDir 'risk-score.json')
@@ -583,6 +593,23 @@ function Build-UnitLevel {
         $lines.Add('Diff coverage: SKIPPED — no diff-coverage.json this run.')
     }
     $lines.Add('')
+    $lines.Add('**Gap lattice** (mechanical, from gap-lattice.json — one tier per changed line):')
+    if ($null -eq $gapLattice) {
+        $lines.Add('SKIPPED — no gap-lattice.json this run.')
+    } else {
+        $latticeUnitEntries = @(Get-Prop $gapLattice 'entries' @()) | Where-Object { (Get-Prop $_ 'kind' '') -in @('missing test', 'missing case') }
+        if (@($latticeUnitEntries).Count -eq 0) {
+            $dcs = [string](Get-Prop $gapLattice 'diffCoverageStatus' '')
+            if ($dcs -eq 'OK') { $lines.Add('No missing-test or missing-case gaps found this run.') }
+            else { $lines.Add("Diff coverage unavailable for the lattice: $dcs") }
+        } else {
+            foreach ($e in $latticeUnitEntries) {
+                $eKindLabel = if ((Get-Prop $e 'kind' '') -eq 'missing test') { 'missing test' } else { 'missing case' }
+                $lines.Add("- ``$([string](Get-Prop $e 'file' '')):$(Get-Prop $e 'line' '')`` — $eKindLabel — $([string](Get-Prop $e 'detail' ''))")
+            }
+        }
+    }
+    $lines.Add('')
     $lines.Add('**Most likely to catch a regression here** (from risk-score.json''s own ranking):')
     foreach ($t in @(Get-Prop $riskScore 'topTests' @())) {
         $lines.Add("- ``$([string](Get-Prop $t 'fqn' ''))`` — $([string](Get-Prop $t 'reason' ''))")
@@ -623,6 +650,20 @@ function Build-MutationLevel {
     if ($fromCache) { $lines.Add('_Verdicts for the mechanical tier were reused from an identical prior run (fromCache: true) — not re-executed this run._'); $lines.Add('') }
     $scoped = $null -ne $strykerSummary -and @(@(Get-Prop $strykerSummary 'projects' @()) | Where-Object { Get-Prop $_ 'testCaseFilter' $null }).Count -gt 0
     $files = Get-Prop $mutationReport 'files' $null
+
+    # file|line -> resolved covering-test name, from gap-lattice.json's "assertion too
+    # weak" entries (risk-score.ps1 — GH issue #26). Mechanical, so every survivor line
+    # below can name the test that failed to catch it without qa-analyst's own judgment.
+    $latticeCoveringTestByKey = @{}
+    if ($null -ne $gapLattice) {
+        foreach ($e in @(Get-Prop $gapLattice 'entries' @())) {
+            if ((Get-Prop $e 'kind' '') -ne 'assertion too weak') { continue }
+            $ct = Get-Prop $e 'coveringTest' $null
+            if ($null -eq $ct) { continue }
+            $latticeCoveringTestByKey["$([string](Get-Prop $e 'file' ''))|$(Get-Prop $e 'line' '')"] = [string]$ct
+        }
+    }
+
     $anySurvivor = $false
     if ($null -ne $files) {
         foreach ($fileKey in $files.PSObject.Properties.Name) {
@@ -643,7 +684,11 @@ function Build-MutationLevel {
                 $startLine = Get-Prop (Get-Prop $m 'location' $null) 'start' $null
                 $lineNum = if ($null -ne $startLine) { Get-Prop $startLine 'line' '?' } else { '?' }
                 $killScope = if ($scoped) { 'no test related to this change kills it' } else { 'no test in the project kills it' }
-                $lines.Add("- **${fileKey}:${lineNum}** ($mutatorName) — $desc — $killScope.")
+                $coveringTestNote = ''
+                if ($latticeCoveringTestByKey.ContainsKey("$fileKey|$lineNum")) {
+                    $coveringTestNote = " — covered by ``$($latticeCoveringTestByKey["$fileKey|$lineNum"])``"
+                }
+                $lines.Add("- **${fileKey}:${lineNum}** ($mutatorName) — $desc — $killScope$coveringTestNote.")
                 $sf = Get-Prop $m 'suggestedFix' $null
                 if ($null -ne $sf) {
                     $lines.Add("  🧪 Generated fix: strengthens ``$([string](Get-Prop $sf 'testFile' ''))``. See 'Generated scenarios' below.")
@@ -656,7 +701,13 @@ function Build-MutationLevel {
         $anySurvivor = $true
         $desc = [string](Get-Prop $m 'businessRule' '')
         $killScope = if ($scoped) { 'no test related to this change kills it' } else { 'no test in the project kills it' }
-        $lines.Add("- **$([string](Get-Prop $m 'file' '')):$(Get-Prop $m 'line' '')** (agentq-$([string](Get-Prop $m 'id' ''))) — $desc — $killScope.")
+        $mFile = [string](Get-Prop $m 'file' '')
+        $mLine = Get-Prop $m 'line' ''
+        $coveringTestNote = ''
+        if ($latticeCoveringTestByKey.ContainsKey("$mFile|$mLine")) {
+            $coveringTestNote = " — covered by ``$($latticeCoveringTestByKey["$mFile|$mLine"])``"
+        }
+        $lines.Add("- **${mFile}:${mLine}** (agentq-$([string](Get-Prop $m 'id' ''))) — $desc — $killScope$coveringTestNote.")
         $sf = Get-Prop $m 'suggestedFix' $null
         if ($null -ne $sf) {
             $lines.Add("  🧪 Generated fix: strengthens ``$([string](Get-Prop $sf 'testFile' ''))``. See 'Generated scenarios' below.")

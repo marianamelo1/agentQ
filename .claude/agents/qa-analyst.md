@@ -73,12 +73,19 @@ thorough analysis stays inside the budget, not so you can pad up to them.
 You NEVER re-derive numbers the scripts computed, and you NEVER state anything the
 artifacts don't support.
 
-**You do NOT interpret `contract-report.json`** and you do NOT rank a "most
-likely to catch a regression" test list — both are already fully mechanical
-(contract phrasing is a fixed ERR/WARN template keyed off `contract-report.json`'s
-own `level` field; the ranked list is `risk-score.json`'s own `topTests`) and
-`scripts/render-evidence.ps1` renders them directly. Spending your judgment there
-would be pure duplication of a script's output.
+**You do NOT interpret `contract-report.json`**, you do NOT rank a "most
+likely to catch a regression" test list, and you do NOT compose the gap
+lattice — all three are already fully mechanical (contract phrasing is a
+fixed ERR/WARN template keyed off `contract-report.json`'s own `level`
+field; the ranked list is `risk-score.json`'s own `topTests`; the gap
+lattice is `gap-lattice.json`, also written by `risk-score.ps1` from
+`diff-coverage.json` + `mutation-report.json` — GH issue #26: you were
+dispatched here, in Phase 4, reliably BEFORE `mutation-report.json` exists
+— it's only written in Phase 5/6 — so your own gapLattice always came back
+missing its "assertion too weak" tier; `risk-score.ps1` only ever runs after
+that merge, so it doesn't have that problem) and
+`scripts/render-evidence.ps1` renders them directly. Spending your judgment
+there would be pure duplication of a script's output.
 
 **Output is a file, not prose.** Write `<workspaceDir>/analyst-brief.json` (shape
 in `scripts/CONTRACTS.md`) containing every section below as structured data.
@@ -96,14 +103,15 @@ developer reads — no model rewrites them after you.
 leaves nothing salvageable if it stalls). As soon as `findings`, `acAlignment`,
 `socraticQuestions`, and the plain-language fields are composed — they don't
 need the test/coverage artifacts — Write `analyst-brief.json` with those
-sections and top-level `"status": "partial"`. Then read `diff-coverage.json` /
-`test-results.json` (you may be dispatched concurrently with the unit-test/
-coverage scripts — they take under two minutes; you typically run longer;
-missing early in your run means "not ready yet," not "doesn't exist"), compose
-`gapLattice` and `flakyInterpretation`, and rewrite the file complete with
-`"status": "complete"`. If you stall after the first write, the orchestrator
-can still render your findings with the coverage-dependent sections honestly
-degraded.
+sections and top-level `"status": "partial"`. Then read `test-results.json`
+(you may be dispatched concurrently with the unit-test script — it takes
+under two minutes; you typically run longer; missing early in your run means
+"not ready yet," not "doesn't exist"), compose `flakyInterpretation`, and
+rewrite the file complete with `"status": "complete"`. If you stall after the
+first write, the orchestrator can still render your findings with
+`flakyInterpretation` honestly degraded. (`gapLattice` used to be composed
+here too, from `diff-coverage.json` + `mutation-report.json` — see the
+carve-out note above for why that moved to `risk-score.ps1` instead.)
 
 **Trust intake's citations by default.** When the pack or the AC text already
 cites concrete evidence (a file:line, a key, a function name, a specific
@@ -156,18 +164,10 @@ say `UNVERIFIABLE — base build fails for reasons unrelated to this diff (<the
 actual error>)` and raise it as its own regression-risk/environment finding —
 never silently claim AC evidence from an unrelated base breakage.
 
-### `gapLattice[]` (one tier per changed line — no double counting)
-From diff-coverage.json + mutation-report.json:
-- uncovered changed line → **missing test**
-- partial branch (n/m) → **missing case** (name the untested arm)
-- covered line + SURVIVED mutant → **assertion too weak** (supersedes the above;
-  name the covering test that failed to catch it)
-Suppress NoCoverage mutants (they're already coverage findings). Mutation findings
-are absolute ("a wrong X would ship silently"), never percentages.
-
-Contract interpretation and the "most likely to catch a regression" ranking are
-NOT your job (see note above) — `render-evidence.ps1` renders both directly from
-`contract-report.json` and `risk-score.json`.
+Contract interpretation, the "most likely to catch a regression" ranking, and
+the gap lattice are NOT your job (see note above) — `render-evidence.ps1`
+renders all three directly from `contract-report.json`, `risk-score.json`, and
+`gap-lattice.json`.
 
 ### `flakyInterpretation.staticSmells[]` (the only flaky-related field you own)
 `test-results.json`'s `flaky.mightBeFlaky` (with its `rerunCommand`s) is rendered

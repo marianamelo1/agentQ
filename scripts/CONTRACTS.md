@@ -597,9 +597,6 @@ Socratic questions, and manual-test-candidate framing.
   "acAlignment": [
     { "ac": "AC-1", "text": "short paraphrase of the AC", "grade": "MET — verified by executed scenario X (failed on base)", "evidence": "file:line / test name / reasoning" }
   ],
-  "gapLattice": [
-    { "kind": "missing test" | "missing case" | "assertion too weak", "file": "…", "line": 47, "detail": "…", "coveringTest": "name, or null for 'missing test'" }
-  ],
   "flakyInterpretation": {
     "staticSmells": [ { "file": "…", "line": 12, "smell": "DateTime.Now" | "unseeded Random" | "Thread.Sleep" | "mutable static" | "Parallelizable+shared state", "note": "…" } ]
   },
@@ -619,10 +616,13 @@ Socratic questions, and manual-test-candidate framing.
 references them by id, and `render-evidence.ps1`'s "Finding detail" section
 numbers itself from whichever ids `report-selection.json` picked, so the main
 report and the evidence file always share one numbering, never two
-independently-assigned ones. `gapLattice` entries that don't rise to a
-top-3 finding still feed the evidence file's per-level Gap Lattice text —
-suppress `NoCoverage` mutants before this (they're `test-results.json`/
-coverage findings, not mutation findings — one tier per changed line).
+independently-assigned ones. This file no longer carries `gapLattice` (GH
+issue #26): qa-analyst is dispatched in Phase 4, reliably before
+`mutation-report.json` exists (written in Phase 5/6), so a lattice composed
+here always came back missing its "assertion too weak" tier. The gap
+lattice is now fully mechanical — see `## gap-lattice.json` below, written
+by `risk-score.ps1` (which only ever runs after the mutation merge) from
+`diff-coverage.json` + `mutation-report.json`.
 `manualTesting` is populated only when `manual-test-candidates.json` exists
 this run — same file, now with the analyst's one-sentence framing attached
 per candidate instead of a bare title.
@@ -757,6 +757,44 @@ one with `executionState: "EXECUTED_PASSED"` and `vacuityGrade:
 `suggestedFix` counts the same way. A scenario that's merely `GENERATED_NOT_EXECUTED`
 or `static_only` earns no credit — only proven-non-vacuous evidence moves this
 number.
+
+## gap-lattice.json  (risk-score.ps1 — second output, GH issue #26)
+`risk-score.ps1` already loads `diff-coverage.json`, `mutation-report.json`,
+and `mutants.json` for its own signals (s2 above), and only ever runs after
+Phase 5's mutation merge — so it composes the gap lattice too, mechanically,
+instead of qa-analyst (Phase 4), which used to write this as
+`analyst-brief.json`'s `gapLattice` but reliably ran before
+`mutation-report.json` existed. Same "second artifact from one script" pattern
+`run-tests.ps1` already uses for `calibration.json`.
+```json
+{
+  "diffCoverageStatus": "OK" | "SKIPPED — no diff-coverage.json this run" | "DEGRADED — <refusalReason>",
+  "mutationStatus": "OK" | "SKIPPED — mutation not run this run",
+  "entries": [
+    { "kind": "missing test" | "missing case" | "assertion too weak", "file": "…", "line": 47, "detail": "…", "coveringTest": "name(s), or null" }
+  ]
+}
+```
+One tier per changed line, no double counting:
+- a `diff-coverage.json` gap with `kind: "uncovered"` → `"missing test"`;
+  `kind: "partial-branch"` → `"missing case"` (`detail` names the untested arm
+  from `conditionCoverage`/`enclosingMethod`).
+- a `mutation-report.json` mutant with `status: "Survived"` (mechanical or
+  semantic alike; `NoCoverage` is suppressed — that's a coverage finding,
+  already covered by the tier above, not a mutation finding) → `"assertion too
+  weak"`, which **supersedes** any tier-1 entry already recorded at the same
+  `file:line` (mutation is scoped to changed-but-covered regions, so a real
+  collision should be rare, but the merge enforces "supersedes, never both"
+  regardless). `coveringTest` resolves a mechanical survivor's `coveredBy` ids
+  against `mutation-report.json`'s own `testFiles{}`; a semantic (`agentq-N`)
+  survivor has no `coveredBy` once merged, so it falls back to its own
+  `mutants.json` entry's `filter` field. Unresolvable → `null`. This is plain
+  data, not markdown — `render-evidence.ps1` wraps it in backticks when
+  rendering, so this field must never itself contain markdown formatting.
+`diffCoverageStatus`/`mutationStatus` degrade honestly and independently: a
+`--quick` run or a denied/auto-skipped mutation consent still produces a
+valid `gap-lattice.json`, just with fewer tiers populated — never a script
+failure, never a silently empty file passed off as "nothing to report".
 
 ## time-ledger.json  (orchestrator appends per phase)
 ```json
