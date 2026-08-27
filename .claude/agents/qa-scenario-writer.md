@@ -18,7 +18,12 @@ touches). For each AC, check its coverage disposition against the `methods[]`
 names alone: a method name like `GetIncludingHiddenAsync_WhenL1Hit_TracksL1HitResultTag`
 is strong evidence an AC about that exact behavior is already covered. Open the
 actual test file ONLY for a class you're about to EXTEND (adding a new method
-that must match its surrounding idiom/fixture setup) or where the names alone
+that must match its surrounding idiom/fixture setup — **except the
+`agentQ-generated` category tag below, which is NEVER part of "matching the
+idiom"; add it to every method you write even when the file you're extending is
+a developer-authored file whose OWN methods don't carry it** — see the Idiom
+bullet's own note, this exact conflict is a verified live mistake, not a
+hypothetical one) or where the names alone
 leave a real ambiguity (e.g. a method name is generic enough that you can't tell
 from its name alone whether it asserts the specific thing the AC requires). Never
 open a test file "just to be thorough" once its names already answer the
@@ -71,6 +76,20 @@ with result=L2Hit"). The technical `title` stays as-is for the evidence file.
   classic asserts break the build. jest → `describe/it`, Testing Library
   role/label queries + userEvent, MSW **v1** API when the repo uses MSW v1 (client
   does — `setupServer` from `msw/node`, `rest.get(...)` handlers, NOT v2's `http`).
+  **The category tag is a MECHANICAL REQUIREMENT, not a style choice — it is
+  the literal filter `run-tests.ps1 -GeneratedOnly` uses (`--filter
+  Category=agentQ-generated`/`TestCategory=agentQ-generated`) to find and
+  execute exactly what you wrote.** A verified live mistake: extending a
+  developer-authored file whose OWN pre-existing methods don't carry this tag
+  (correctly — they're not yours), the surrounding-idiom instruction above got
+  misapplied to the tag itself, and 4 new methods were added with no tag at
+  all — they compiled, sat in the correct file at the correct path, and were
+  never discovered by any run, forever, silently, exactly the same class of
+  invisible failure as the GH #37 placement bug, just one level deeper (right
+  file, wrong tag instead of wrong file). "Match the surrounding idiom"
+  governs formatting, assertion style, fixture setup — it never governs
+  whether YOUR method carries YOUR tag. Every method you add gets the tag,
+  full stop, independent of what the file's other methods do.
 - **Assertion dialect**: mirror the profile (`fluentassertions`/`shouldly`/native).
   Never introduce a library the project doesn't reference.
 - **API tests**: one `WebApplicationFactory<TEntryPoint>` per assembly via the
@@ -81,16 +100,37 @@ with result=L2Hit"). The technical `title` stays as-is for the evidence file.
   DI overrides via `ConfigureWebHost`+`ConfigureServices`; EF swap uses
   `IDbContextOptionsConfiguration<T>` (net9/10) — never the net8 form on these
   repos. Deterministic seed data; no calls to anything non-loopback.
-- **Placement**: worktree-relative file path under `placementRoot`, folder within
-  `placementAllowedFolders` when non-empty (payroll CI enforces it) — written
-  physically as `<workspaceDir>/generated/<that path>`. Compile-clean
-  under `TreatWarningsAsErrors` and BannedApiAnalyzers (no `ConfigureAwait(false)`
-  bans violated — that ban is prod-code-only, but don't trigger analyzers in tests
-  either).
+- **Placement**: the rendered file's path (both the physical write location and
+  the `renderedTo` value you record) MUST start with the exact `placementRoot`
+  string from the adapter-profile pack for the target project — e.g.
+  `placementRoot: "apps/backend/tests/payroll/Visma.Payroll.Infrastructure.UnitTests"`
+  means the path is `apps/backend/tests/payroll/Visma.Payroll.Infrastructure.UnitTests/<rest>`,
+  never a shorter path that happens to end the same way. **Before writing, check
+  your own path against this rule** — GH issue #37: a rendered file once landed
+  at `Infrastructure/Payroll/Decorators/Foo.cs` (missing the `placementRoot`
+  prefix its sibling files in the same dispatch got right); `worktree.ps1`
+  materializes whatever `renderedTo` says verbatim, so that file landed at the
+  worktree ROOT — outside every `.csproj`'s glob — and silently never compiled
+  or ran, on every subsequent run, with no error anywhere. A wrong path here is
+  invisible everywhere else; you are the only checkpoint that can catch it, and
+  `worktree.ps1`'s own copy step now rejects (with a loud warning, not a
+  compile) a path that doesn't match any known `placementRoot`, but that is a
+  backstop, not a substitute for getting it right the first time — a rejected
+  file just means the scenario silently doesn't execute this run either. Then
+  respect `placementAllowedFolders` when non-empty (payroll CI enforces it).
+  Compile-clean under `TreatWarningsAsErrors` and BannedApiAnalyzers (no
+  `ConfigureAwait(false)` bans violated — that ban is prod-code-only, but don't
+  trigger analyzers in tests either).
 - **Traceability**: every test carries a comment `// AC-<n>: <verbatim AC text>` and
   at least one assertion that would fail if the AC's behavior regressed. No vacuous
   tests — asserting "did not throw" alone is banned.
-- Record each rendered path in the IR's `renderedTo`.
+- Record each rendered path in the IR's `renderedTo` — the SAME string used for
+  the physical write under `<workspaceDir>/generated/<that path>` (never a
+  different, shorter, or reformatted path in one place than the other) — plus
+  `renderedTestMethod`, the exact method/test name you added (bare name, no
+  class prefix, no parameters). Both are how `run-tests.ps1` mechanically
+  verifies your output actually exists AND is tagged, without trusting your
+  self-report — fill them in even when you're confident you got it right.
 
 ## Step 3 — Human artifacts
 List which scenarios have `http` blocks so the orchestrator can run

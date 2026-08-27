@@ -268,6 +268,20 @@ $sortedScenarios = @($scenarioFiles | Sort-Object { $lv = [string](Get-Prop $_ '
 foreach ($s in $sortedScenarios) {
     $line = [string](Get-Prop $s 'plainTitle' '')
     if ($line -eq '') { $line = [string](Get-Prop $s 'title' 'Generated test (no title recorded)') }
+    # GH issue #37: a scenario that was never proven to compile/pass (e.g. its
+    # rendered file landed outside every test project and silently never ran)
+    # used to list identically to one that actually executed and passed --
+    # a developer accepting "keep all" could ship a test that has never even
+    # built. EXECUTED_PASSED is the only state that reads as verified; every
+    # other value (EXECUTED_FAILED, GENERATED_NOT_EXECUTED, null/missing --
+    # e.g. --quick mode or denied execution consent) gets an honest, plain
+    # marker instead of silence. Never surfaces executionNote's raw text here
+    # (that field is written for the evidence file, not this plain-language one).
+    $state = [string](Get-Prop $s 'executionState' '')
+    if ($state -ne 'EXECUTED_PASSED') {
+        $line += if ($state -eq 'EXECUTED_FAILED') { ' (⚠️ failed when tested — needs a fix before keeping)' }
+                 else { ' (⚠️ not proven to work yet this run)' }
+    }
     $keepList.Add($line)
 }
 

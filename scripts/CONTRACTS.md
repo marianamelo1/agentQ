@@ -289,9 +289,39 @@ treats it the same as "no prior coverage to check against."
     "policy": "no-local-reruns",
     "note": "<why agentQ never re-runs, and what the developer should do>",
     "mightBeFlaky": [{ "fqn": "…", "projectPath": "…", "rerunCommand": "…" }]
-  }
+  },
+  "orphanedGeneratedFiles": [{ "scenarioId": "EC76015-1", "renderedTo": "apps/backend/tests/…/Foo.cs" }],
+  "untaggedGeneratedMethods": [{ "scenarioId": "AC-1-1", "renderedTo": "apps/backend/tests/…/Foo.cs", "method": "GetAsync_WhenCalledFirst_..." }]
 }
 ```
+`orphanedGeneratedFiles` (**`-GeneratedOnly` runs only**, always present as an
+array — empty is the normal case): GH issue #37 — a scenario's `renderedTo`
+path that doesn't exist in the executed tree (`$execRoot`) at run time never
+compiled and could not have contributed to `passed`/`testsExecuted` above,
+regardless of how clean those numbers look. Populated by cross-checking every
+`scenarios/scenario-*.json`'s `renderedTo` entries against the filesystem —
+independent of, and a backstop for, `worktree.ps1`'s own `Copy-GeneratedTests`
+refusal to stage such a file in the first place (that refusal only surfaces as
+a `Write-Warning` during `-Ensure`, easy to miss by the time this artifact is
+read). A non-empty array means the run's generated-test pass count is
+incomplete, not wrong — the scenarios named are un-executed, not failed;
+consumers should grade their `executionState` as `GENERATED_NOT_EXECUTED`
+with this as the reason, never silently count them as covered.
+
+`untaggedGeneratedMethods` (**`-GeneratedOnly` runs only**, always present as
+an array — empty is the normal case): the same GH issue #37, one layer
+deeper — a scenario whose `renderedTo` file DOES exist and compiles, but
+whose `renderedTestMethod` is missing the literal `agentQ-generated` category
+tag a few lines above its declaration, so `--filter
+Category=agentQ-generated` never selects it. Verified live: extending a
+developer-authored file, `qa-scenario-writer` once matched that file's own
+(correctly untagged) methods instead of tagging its own new ones. A scenario
+present here compiles fine and contributes zero evidence to `passed`/
+`testsExecuted` all the same — grade its `executionState` as
+`GENERATED_NOT_EXECUTED` exactly like an orphaned file, never as covered. A
+scenario missing `renderedTestMethod` is silently skipped by this specific
+check (nothing to search for) — it can still appear in
+`orphanedGeneratedFiles` if its file is also missing.
 `flaky` carries NO rerun results — agentQ never re-runs tests to confirm
 flakiness (removed by design: re-runs multiply the run's wall-clock, and one
 machine's re-run can't prove stability anyway). Every failed test appears in
@@ -488,10 +518,21 @@ no Stryker execution this run). Two consumer rules bind:
   "http": { "method": "POST", "path": "/api/invoices", "body": {}, "expectStatus": 422, "expectBody": {} },
   "targetProject": "<projectPath from adapter-profiles>",
   "renderedTo": ["worktree-relative path of generated test file — the physical file lives in <workspaceDir>/generated/<that path> (the staging dir; see the generated/ section above), and worktree.ps1 materializes it into both worktrees"],
+  "renderedTestMethod": "bare method/test name added for this scenario, no class prefix, no parameters",
   "executionState": "EXECUTED_PASSED" | "EXECUTED_FAILED" | "GENERATED_NOT_EXECUTED" | null,
   "vacuityGrade": "verified_against_base" | "verified_non_compiling_on_base" | "static_only" | null
 }
 ```
+`renderedTestMethod` (GH issue #37's follow-on): the mechanical counterpart to
+`renderedTo` — which FILE isn't enough to prove a scenario's test actually
+executes, since a method can compile inside the right file yet still be
+invisible to `-GeneratedOnly`'s `--filter Category=agentQ-generated` if it's
+missing the category tag (verified live: extending a developer-authored file
+whose own methods don't carry the tag, qa-scenario-writer once matched that
+surrounding style instead of tagging its OWN new methods — same "silently
+never executes, forever" failure shape as a misplaced `renderedTo`, one layer
+deeper). `run-tests.ps1 -GeneratedOnly` cross-checks this field the same way
+it cross-checks `renderedTo` — see `untaggedGeneratedMethods` below.
 `level: "unit"` is for a scenario that calls a function/module directly with no
 render, no DB, no HTTP — e.g. asserting an invariant on a pure helper's return
 value (verified case: a column-header-uniqueness check with no React render
