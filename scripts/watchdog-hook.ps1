@@ -14,20 +14,38 @@ This script is what a `Stop` hook and a `SubagentStop` hook (registered in
 the check happens deterministically instead of depending on memory.
 
 Modes (exactly one per invocation):
-  -Arm      -Label <l> -Agent <a> -CeilingSeconds <n> [-StatePath <p>]
+  -Arm      -Label <l> -Agent <a> -CeilingSeconds <n> [-TimerTaskId <id>]
+            [-StatePath <p>]
                                     Upsert an entry (fresh dispatchedAt = now,
                                     deadlineAt = now + CeilingSeconds). Run in
                                     the SAME tool-call batch as a dispatch.
-  -Extend   -Label <l> -AdditionalSeconds <n> [-StatePath <p>]
+                                    -TimerTaskId records the paired background
+                                    timer's own task id (from the Bash/
+                                    PowerShell run_in_background result) so
+                                    -Clear can hand it back later (GH issue
+                                    #52 - see below).
+  -Extend   -Label <l> -AdditionalSeconds <n> [-TimerTaskId <id>]
+            [-StatePath <p>]
                                     Push an existing entry's deadlineAt out by
                                     N seconds (dispatchedAt untouched). No-op
                                     (warns to stderr, exits 0) if the label
                                     isn't armed - a bookkeeping mismatch here
                                     must never fail the orchestrator's turn.
+                                    -TimerTaskId replaces the stored timer
+                                    task id with the NEW extension timer's id
+                                    (the original timer already fired - that's
+                                    why this is an -Extend call at all).
   -Clear    -Label <l> [-StatePath <p>]
                                     Remove one entry (resolved, given up on,
                                     or about to be replaced by a fresh -Arm).
-                                    No-op if the label isn't armed.
+                                    No-op if the label isn't armed. If the
+                                    entry carried a -TimerTaskId, it is printed
+                                    back on stdout as an explicit instruction -
+                                    the caller MUST TaskStop that id in this
+                                    same turn (GH issue #52: clearing the state
+                                    entry alone leaves the paired background
+                                    timer running until it fires its own
+                                    now-useless notification).
   -ClearAll [-StatePath <p>]       Reset to an empty ledger (Phase 0 preflight
                                     on a fresh run; Phase 9 cleanup).
   -List     [-StatePath <p>]       Print the current ledger as JSON (debugging).
@@ -69,8 +87,20 @@ agents"), so a stale entry can only be seen again by a session that actually
 armed it, never by an unrelated future session.
 
 Contract: -Arm/-Extend/-Clear/-ClearAll/-List always exit 0 (bookkeeping must
-never fail the orchestrator's turn) and print one prose summary line. -Stop/
--SubagentStop exit 0 (no block) or 2 (block, reason on stderr) - see above.
+never fail the orchestrator's turn) and print one prose summary line (-Clear/
+-ClearAll print a second line per still-live paired timer - see GH issue #52
+below). -Stop/-SubagentStop exit 0 (no block) or 2 (block, reason on stderr) -
+see above.
+
+GH issue #52: -Clear/-ClearAll only ever removed the JSON entry: the paired
+background timer started alongside it (SKILL.md step 1) kept running
+regardless, so a dispatch that finished on time still produced a second, useless
+"background command completed" notification once its timer separately expired -
+observed live on every one of 7 dispatches in a full run. -Arm/-Extend now
+accept -TimerTaskId to record that timer's own task id in the state file, and
+-Clear/-ClearAll echo it straight back on stdout as an explicit "TaskStop this
+now" instruction, so stopping the timer is a mechanical read of this script's
+output rather than something the orchestrator has to remember across turns.
 #>
 [CmdletBinding()]
 param(
@@ -86,6 +116,7 @@ param(
     [string]$Agent,
     [int]$CeilingSeconds,
     [int]$AdditionalSeconds,
+    [string]$TimerTaskId, # -Arm/-Extend only: the paired background timer's task id (GH issue #52)
 
     [string]$StatePath,   # override for testing; default resolved below
     [string]$StdinPath    # -Stop/-SubagentStop testing: read this file instead of Console.In
@@ -188,6 +219,7 @@ if ($Arm) {
         ceilingSeconds    = $CeilingSeconds
         deadlineAt        = ConvertTo-Iso8601FromEpoch $deadlineEpoch  # display only, never re-parsed
         deadlineAtEpoch   = $deadlineEpoch
+        timerTaskId       = $(if ([string]::IsNullOrWhiteSpace($TimerTaskId)) { $null } else { $TimerTaskId })
     }
     Write-StateFile -Entries ($entries + [pscustomobject]$entry)
     Write-Output "Armed '$Label' ($Agent): ceiling ${CeilingSeconds}s, deadline $($entry.deadlineAt)"
@@ -207,23 +239,65 @@ if ($Extend) {
     $newDeadlineEpoch = [int64]$match.deadlineAtEpoch + $AdditionalSeconds
     $match.deadlineAtEpoch = $newDeadlineEpoch
     $match.deadlineAt = ConvertTo-Iso8601FromEpoch $newDeadlineEpoch
+    # The original timer already fired (that's why this is an -Extend call at
+    # all) - a fresh extension timer was started alongside it, so its task id
+    # replaces the stale one. Omitting -TimerTaskId leaves the old (already-
+    # fired, harmless) id in place rather than guessing.
+    if (-not [string]::IsNullOrWhiteSpace($TimerTaskId)) {
+        $match.timerTaskId = $TimerTaskId
+    }
     Write-StateFile -Entries $entries
     Write-Output "Extended '$Label' by ${AdditionalSeconds}s: new deadline $($match.deadlineAt)"
     exit 0
 }
 
+function Get-TimerTaskId {
+    # $entries comes from ConvertFrom-Json - an entry armed before this fix (or
+    # armed with no -TimerTaskId) may simply lack the property, so check via
+    # PSObject rather than a bare property read (Set-StrictMode throws on the
+    # latter for a missing NoteProperty).
+    param($EntryObject)
+    $prop = $EntryObject.PSObject.Properties['timerTaskId']
+    if ($null -eq $prop) { return $null }
+    if ([string]::IsNullOrWhiteSpace([string]$prop.Value)) { return $null }
+    return [string]$prop.Value
+}
+
 if ($Clear) {
     if ([string]::IsNullOrWhiteSpace($Label)) { throw '-Clear requires -Label <l>' }
     $entries = Read-StateFile
+    $removed = @($entries | Where-Object { $_.label -eq $Label })
     $remaining = @($entries | Where-Object { $_.label -ne $Label })
     Write-StateFile -Entries $remaining
-    Write-Output "Cleared '$Label' ($($entries.Count - $remaining.Count) entry removed)."
+    Write-Output "Cleared '$Label' ($($removed.Count) entry removed)."
+    foreach ($e in $removed) {
+        # WHY $pairedTimerId, not $timerTaskId: PowerShell variable names are
+        # case-insensitive, so `$timerTaskId` here would be the SAME PSVariable
+        # as the script's own `[string]$TimerTaskId` parameter above - which
+        # carries a [string] type constraint. Reusing that name silently
+        # coerces Get-TimerTaskId's $null return into "" (empty string) on
+        # assignment, defeating the "$null means no timer to stop" check below
+        # (verified live: '-> ACTION REQUIRED ... TaskStop ''' printed for an
+        # entry armed with no timer at all). A differently-named variable
+        # avoids the collision entirely.
+        $pairedTimerId = Get-TimerTaskId $e
+        if ($null -ne $pairedTimerId) {
+            Write-Output "  -> ACTION REQUIRED: its paired background timer is still running (task '$pairedTimerId') - call TaskStop '$pairedTimerId' now, in this same turn (GH issue #52)."
+        }
+    }
     exit 0
 }
 
 if ($ClearAll) {
+    $entries = Read-StateFile
     Write-StateFile -Entries @()
-    Write-Output 'Cleared all watchdog entries.'
+    Write-Output "Cleared all watchdog entries ($($entries.Count) removed)."
+    foreach ($e in $entries) {
+        $pairedTimerId = Get-TimerTaskId $e
+        if ($null -ne $pairedTimerId) {
+            Write-Output "  -> ACTION REQUIRED: '$($e.label)' had a paired background timer still tracked (task '$pairedTimerId') - call TaskStop '$pairedTimerId' now if it's still running (GH issue #52)."
+        }
+    }
     exit 0
 }
 
