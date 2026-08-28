@@ -21,27 +21,43 @@ the plain-language summary live there.
 |---|---|---|---|---|
 | {{repoSlug}} | `{{branch}}` | `{{baseSha-short}}` (fetched {{fetch-age, e.g. "4 min ago" — now minus run-manifest.fetchedAt}}) | {{ticketKey or "— none —"}} | {{YYYY-MM-DD HH:mm}} |
 
-## Run summary
+## Run timeline
 
-<!-- From time-ledger.json verbatim (agentsCalled/phases/totalSeconds), never
-     recomputed. Lists only LLM subagents in "Agents called" (never scripts) —
-     omit ones skipped this run (qa-scenario-writer on a cache hit,
-     qa-e2e-author on a backend-only diff). The "Actor" column names whichever
-     agent(s) and/or script(s) did that phase's work — this is what makes it
-     honest that most wall-clock is deterministic scripts, not model calls.
-     ONE table carries both actor and outcome per phase — there is no separate
-     "Time ledger" section below. The "report" phase's row exists because the
+<!-- The run's only phase/timing table — rendered by
+     scripts/render-evidence.ps1's Build-RunTimeline from time-ledger.json
+     verbatim, never recomputed. Lists only LLM subagents in "Agents called"
+     (never scripts) — omit ones skipped this run (qa-scenario-writer on a
+     cache hit, qa-e2e-author on a backend-only diff). The "Actor" column
+     names whichever agent(s) and/or script(s) did that phase's work — this
+     is what makes it honest that most wall-clock is deterministic scripts,
+     not model calls. The "report" phase's row exists because the
      orchestrator appends it (with the real measured seconds) AFTER
-     scripts/render-report.ps1 runs and BEFORE this file is rendered. -->
+     scripts/render-report.ps1 runs and BEFORE this file is rendered.
+
+     Started/Ended come from time-ledger.json's runStartedAt/runEndedAt +
+     each phase's startedAt/endedAt (all ISO8601 UTC) — the real wall-clock
+     from the developer's first message to the moment this report was
+     delivered. A "consent-wait" row (actor: "developer (chat reply)")
+     separates human answer-latency from machine time, so a slow run caused
+     by the developer thinking is never misread as agentQ being slow. Older
+     manifests without these timestamps fall back to a Phase/Actor/Seconds/
+     Outcome table with no Started/Ended columns — never a fabricated
+     timestamp. When this run exceeded the slow-run threshold
+     (scripts/file-perf-issue.ps1's -ThresholdMinutes default), a
+     closing line names whether an issue was auto-filed (perf-issue.json) and
+     links it, or states honestly why not (gh CLI missing/unauthenticated). -->
 
 **Agents called:** {{agentsCalled joined by " · ", or "— none (all cached / skipped) —"}}
 
-| Phase | Actor | Seconds | Outcome |
-|---|---|---|---|
-| {{phase name}} | {{actor}} | {{seconds}} | {{RAN \| DEGRADED — … \| SKIPPED — …}} |
+**First message:** {{runStartedAt}} → **Report delivered:** {{runEndedAt}}
 
-**Total wall-clock: {{totalSeconds, formatted e.g. "3m 42s"}}** (phases marked
-"overlapped" run concurrently — this is measured elapsed time, not the column sum)
+| Phase | Actor | Started | Ended | Seconds | Outcome |
+|---|---|---|---|---|---|
+| {{phase name}} | {{actor}} | {{startedAt}} | {{endedAt}} | {{seconds}} | {{RAN \| DEGRADED — … \| SKIPPED — … \| ANSWERED}} |
+
+**Total real elapsed time: {{totalSeconds, formatted}}** — machine time
+{{machineSeconds, formatted}}, developer answer-latency (consent-wait)
+{{waitSeconds, formatted}}.
 
 ## Finding detail
 

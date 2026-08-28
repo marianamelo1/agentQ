@@ -22,8 +22,11 @@ Modes (exactly one switch per invocation):
                                                      see CONTRACTS.md.
   -Heal            -RepoPath <repo>                  Phase 0 crash recovery (runs before any manifest exists).
   -EnsureWorkspace -RepoSlug <cfgKey> -Branch <b> -RepoPath <repo> [-TicketKey <k>] [-Manifest <out>]
+                   [-RunStartedAt <iso8601>]
                                                      Creates workspace/<repoSlug>/<branchSlug>/, pins baseSha,
-                                                     writes run-manifest.json (CONTRACTS.md).
+                                                     writes run-manifest.json (CONTRACTS.md). -RunStartedAt is
+                                                     the orchestrator's own wall-clock from the FIRST action of
+                                                     the run (Phase 0) - anchors the evidence file's Run timeline.
   -DiffSet         -Manifest <run-manifest.json>     Writes diff-set.json (merge-base diff ∪ untracked).
   -Ensure          -Manifest <run-manifest.json>     Persistent detached worktree mirroring the dev's tree
                                                      (committed tip + uncommitted diff + untracked files).
@@ -71,6 +74,11 @@ param(
     [string]$RepoSlug,      # the productRepos config key, may contain '/' (e.g. "e-conomic/payroll-poc")
     [string]$Branch,
     [string]$TicketKey = '',
+    [string]$RunStartedAt = '', # ISO8601, orchestrator's own wall-clock at the FIRST action of this run
+                                 # (the developer's request, not this script's invocation) - written into
+                                 # run-manifest.json as runStartedAt. '' = orchestrator didn't capture one
+                                 # (e.g. a standalone script call) - falls back to fetchedAt below rather
+                                 # than leaving the field absent, so every manifest has a real timestamp.
 
     # -DetectRepo only
     [string]$ConfigPath,      # path to qa-agent-config.jsonc
@@ -710,6 +718,11 @@ function Invoke-ModeEnsureWorkspace {
     if ($baseSha -notmatch '^[0-9a-f]{40}$') { throw "merge-base returned unexpected value '$baseSha'" }
 
     $worktreeDir = Join-Path $workspaceDir 'worktree'
+    # Real wall-clock the developer's request started at - anchors the evidence file's Run
+    # timeline (CLAUDE.md Phase 8, CONTRACTS.md run-manifest.json). Falls back to fetchedAt
+    # (this call's own timestamp) when the orchestrator didn't pass one, so the field is
+    # never absent - just slightly late (misses Phase 0's own seconds on that fallback path).
+    $runStartedAtValue = if ([string]::IsNullOrWhiteSpace($RunStartedAt)) { $fetchedAt } else { $RunStartedAt }
     $manifestObj = [ordered]@{
         repoSlug        = $RepoSlug       # the config key verbatim (may contain '/'), per CONTRACTS.md
         repoPath        = $repo
@@ -717,6 +730,7 @@ function Invoke-ModeEnsureWorkspace {
         baseRef         = $baseRef
         baseSha         = $baseSha
         fetchedAt       = $fetchedAt
+        runStartedAt    = $runStartedAtValue
         workspaceDir    = $workspaceDir
         worktreeDir     = $worktreeDir
         worktreeBaseDir = (Join-Path $workspaceDir 'worktree-base')   # created lazily by -EnsureBase

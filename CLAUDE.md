@@ -151,6 +151,19 @@ Pipeline/CI mode is Phase 2 of the roadmap — nothing here assumes it.
 - **Consent is per-run and informed.** Two consent moments (mutation, execution) are
   chat questions unless the config toggles say `always`/`never`. A denied consent is
   a SKIPPED ledger line, never a silent hole.
+- **Slow-run issue filing is the one automatic write to a real external
+  system.** Every run logs real ISO8601 timestamps from the developer's first
+  message to the delivered report (Phase 8, `time-ledger.json`) and, when the
+  real elapsed time exceeds the slow-run threshold
+  (`scripts/file-perf-issue.ps1`'s `-ThresholdMinutes` default — the script is
+  the single source of truth for the value), files a GitHub issue in
+  agentQ's OWN repo (its `-TargetRepo` default) — never a product repo, never
+  silent (a filed issue is always linked in the closing chat line and the
+  evidence file; a skip is always named honestly, e.g. `gh` not
+  authenticated). This is the maintainer's runtime telemetry. Uses the
+  developer's own `gh auth login` — no MCP, and agentQ never
+  stores or manages its own GitHub token, same standing rule as every other
+  secret in this project.
 - **Honesty over completeness** (see Reporting): a skipped or degraded check must
   never read as a pass; every requirement claim carries its evidence source; the
   risk score is a labeled heuristic, never a "probability of passing CI".
@@ -706,10 +719,34 @@ that prose VERBATIM). One chained command:
    so the evidence file shares the exact same numbering.
 2. The orchestrator appends `{ name: "report", actor:
    "scripts/render-report.ps1", seconds: <measured, ~1-2s>, outcome: "RAN" }`
-   to `time-ledger.json`.
-3. **`scripts/render-evidence.ps1` writes the evidence file** — same name +
-   `-evidence.md`, deterministically: ONE merged Phase/Actor/Seconds/Outcome
-   table (from `time-ledger.json`), per-finding file:line detail (from
+   to `time-ledger.json`, captures `runEndedAt` (ISO8601, real wall-clock —
+   the answer is about to be delivered), and sets `time-ledger.json`'s
+   `runStartedAt`/`runEndedAt`/`totalSeconds` from it and from
+   `run-manifest.json`'s own `runStartedAt` (captured as the FIRST action of
+   Phase 0 — see SKILL.md's real-timestamp run-log note). This is a real,
+   measured wall-clock from the developer's first message to this exact
+   moment — not an estimate — and every phase row appended throughout the run
+   SHOULD carry its own `startedAt`/`endedAt` too (a `"consent-wait"` row
+   brackets each consent question, so human answer-latency is never
+   misattributed to agentQ).
+3. **Slow-run check**: `scripts/file-perf-issue.ps1`, on every run — agentQ's
+   own runtime telemetry for the maintainer. It owns the threshold decision
+   itself (its `-ThresholdMinutes` parameter default — the single source of
+   truth for the value); under threshold, it records that and does nothing
+   else. Over threshold, it files a GitHub issue in agentQ's OWN repo (its
+   `-TargetRepo` default, never a product repo) via the developer's own
+   `gh auth login` — never a stored token, no MCP — with a mechanical
+   phase-by-phase breakdown and improvement suggestions, and writes
+   `perf-issue.json` (CONTRACTS.md).
+   Degrades honestly (gh missing/unauthenticated/failed) and
+   NEVER blocks or delays the report — it runs after the report/evidence
+   files already exist, and its only visible effect on a failure is one extra
+   honest chat line.
+4. **`scripts/render-evidence.ps1` writes the evidence file** — same name +
+   `-evidence.md`, deterministically: ONE run/phase table, "Run timeline"
+   (Phase/Actor/Started/Ended/Seconds/Outcome, from `time-ledger.json`'s real
+   ISO8601 bookends + per-phase timestamps from step 2, plus the filed-issue
+   link from step 3 when one exists), per-finding file:line detail (from
    `analyst-brief.json` + `report-selection.json`, exact same numbering as the
    main report), capability matrix, impact map + manual-testing detail,
    per-level sections (contract ERR/WARN phrasing and the "most likely to
@@ -799,8 +836,9 @@ cut, don't compress; overflow goes to the evidence file):
 **Evidence file** (`templates/report/evidence-template.md`, rendered
 deterministically by `scripts/render-evidence.ps1` — zero model calls) holds
 everything the main report dropped, at full rigor:
-- ONE merged run/phase table (Phase/Actor/Seconds/Outcome — no separate,
-  duplicated "Run summary" and "Time ledger" sections) + per-finding technical
+- ONE run/phase table, "Run timeline" (Phase/Actor/Started/Ended/Seconds/
+  Outcome, real ISO8601 timestamps — no separate "Run summary" or "Time
+  ledger" sections) + per-finding technical
   detail (file:line, mutant ids, coverage numbers, test names — one subsection
   per main-report finding, from `analyst-brief.json` + `report-selection.json`).
 - Capability matrix: one row per level **plus one Impact row** (cross-repo /

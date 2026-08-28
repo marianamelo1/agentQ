@@ -227,6 +227,17 @@ $prereqsOk = $true
 
 $prereqsOk = (Install-IfMissing -Command git -DisplayName 'git' -WingetId 'Git.Git' -BrewFormula 'git') -and $prereqsOk
 
+# gh is optional (scripts using it degrade honestly without it), so it never gates $prereqsOk.
+$null = Install-IfMissing -Command gh -DisplayName 'GitHub CLI (gh) - optional' -WingetId 'GitHub.cli' -BrewFormula 'gh'
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    & gh auth status *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[ok] gh authenticated" -ForegroundColor Green
+    } else {
+        Write-Host "[note] gh present but not authenticated - run: gh auth login" -ForegroundColor Yellow
+    }
+}
+
 $nodeOk = Install-IfMissing -Command node -DisplayName "Node $MinNodeMajor+" -WingetId 'OpenJS.NodeJS.LTS' -BrewFormula 'node'
 if ($nodeOk) {
     $nodeMajor = [int]((node --version) -replace '^v' -split '\.')[0]

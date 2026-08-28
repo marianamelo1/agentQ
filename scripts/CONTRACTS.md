@@ -63,12 +63,28 @@ explicitly (see `SKILL.md` Inputs):
   "baseRef": "origin/main",
   "baseSha": "<40-char merge-base sha, pinned once>",
   "fetchedAt": "2026-08-20T14:05:00Z",
+  "runStartedAt": "2026-08-20T14:04:12Z",
   "workspaceDir": "C:\\agentQ\\workspace\\e-conomic__payroll-poc\\feature-EC-1234-vat-rounding",
   "worktreeDir": "<workspaceDir>\\worktree",
   "worktreeBaseDir": "<workspaceDir>\\worktree-base",
   "ticketKey": "EC-1234"
 }
 ```
+`runStartedAt` is the orchestrator's own real wall-clock (`Get-Date`/`date -u`,
+ISO8601 UTC) captured at the very FIRST action of the run — the top of Phase 0,
+before config is even read — not this script's own invocation time (which is
+usually a second or two later, after -DetectRepo and -Heal already ran). Passed
+in via `-EnsureWorkspace -RunStartedAt <iso8601>`; falls back to `fetchedAt`
+(this call's own timestamp) only when the caller didn't pass one, so the field
+is never absent — just slightly late on that fallback path (it then misses
+Phase 0's own seconds). This is the anchor for the evidence file's Run timeline
+section (below, `time-ledger.json`) and the `/qa-review`/`/qa-impact` slow-run
+check — see CLAUDE.md Phase 8 and `file-perf-issue.ps1` below. It is a
+DIFFERENT concept from SKILL.md's watchdog `runStart` (captured later, at the
+combined-consent moment, purely to anchor the 10-minute run-budget check) —
+`runStartedAt` is earlier and only ever read for reporting, never for a
+watchdog deadline.
+
 `worktreeBaseDir` names the persistent BASE worktree (`worktree.ps1 -EnsureBase`,
 created lazily — the path is in the manifest before the dir exists). Anti-vacuity
 runs there (`run-tests.ps1 -GeneratedOnly -WorktreeRoot <worktreeBaseDir>
@@ -808,13 +824,16 @@ failure, never a silently empty file passed off as "nothing to report".
 ## time-ledger.json  (orchestrator appends per phase)
 ```json
 {
+  "runStartedAt": "2026-08-20T14:04:12Z",
+  "runEndedAt": "2026-08-20T14:11:38Z",
   "agentsCalled": ["qa-intake", "qa-analyst", "qa-scenario-writer", "qa-mutation-author"],
   "phases": [
-    { "name": "unit", "actor": "scripts/run-tests.ps1", "seconds": 42.3, "outcome": "RAN" | "DEGRADED — …" | "SKIPPED — …" },
-    { "name": "scenario-authoring", "actor": "qa-scenario-writer", "seconds": 189.4, "outcome": "DEGRADED — agent stalled after dispatch (watchdog ceiling 4.5min + 45s grace), re-dispatched once, succeeded on retry", "stall": { "watchdogFired": true, "retried": true, "retrySucceeded": true, "runBudgetRemainingAtRetrySec": 312.0 } },
-    { "name": "mutation-design", "actor": "qa-mutation-author", "seconds": 270.0, "outcome": "DEGRADED — agent stalled, lane skipped (run-budget)", "stall": { "watchdogFired": true, "retried": false, "retrySucceeded": false, "runBudgetRemainingAtRetrySec": 41.0 } }
+    { "name": "unit", "actor": "scripts/run-tests.ps1", "seconds": 42.3, "startedAt": "2026-08-20T14:05:10Z", "endedAt": "2026-08-20T14:05:52Z", "outcome": "RAN" | "DEGRADED — …" | "SKIPPED — …" },
+    { "name": "consent-wait", "actor": "developer (chat reply)", "seconds": 38.0, "startedAt": "2026-08-20T14:04:40Z", "endedAt": "2026-08-20T14:05:18Z", "outcome": "ANSWERED" },
+    { "name": "scenario-authoring", "actor": "qa-scenario-writer", "seconds": 189.4, "startedAt": "2026-08-20T14:05:18Z", "endedAt": "2026-08-20T14:08:27Z", "outcome": "DEGRADED — agent stalled after dispatch (watchdog ceiling 4.5min + 45s grace), re-dispatched once, succeeded on retry", "stall": { "watchdogFired": true, "retried": true, "retrySucceeded": true, "runBudgetRemainingAtRetrySec": 312.0 } },
+    { "name": "mutation-design", "actor": "qa-mutation-author", "seconds": 270.0, "startedAt": "2026-08-20T14:05:18Z", "endedAt": "2026-08-20T14:09:48Z", "outcome": "DEGRADED — agent stalled, lane skipped (run-budget)", "stall": { "watchdogFired": true, "retried": false, "retrySucceeded": false, "runBudgetRemainingAtRetrySec": 41.0 } }
   ],
-  "totalSeconds": 222.0
+  "totalSeconds": 446.0
 }
 ```
 `agentsCalled` lists only the LLM subagents actually spawned this run (never
@@ -822,10 +841,30 @@ scripts) — omit one that was skipped (e.g. `qa-scenario-writer` on a cache hit
 `qa-e2e-author` on a backend-only diff). `actor` on each phase names whichever
 agent(s) and/or script(s) did that phase's work (e.g. `"qa-analyst +
 qa-scenario-writer (overlapped)"`) — this is what lets the report show, honestly,
-that most wall-clock time is deterministic scripts, not model calls. `totalSeconds`
-is measured wall-clock for the whole run, not the sum of the `phases` column (phases
-that overlap by design — Phase 4 with Phases 2–3, model work with CPU work — make
-the sum larger than reality).
+that most wall-clock time is deterministic scripts, not model calls.
+
+`runStartedAt`/`runEndedAt` (ISO8601 UTC) are the real wall-clock bookends of
+the ENTIRE run — from the developer's first message (copied from
+`run-manifest.json`'s `runStartedAt`, itself captured at the top of Phase 0) to
+the moment the orchestrator is about to answer with the report link (captured
+right after `render-report.ps1` runs, alongside the `"report"` phase's own
+`seconds`). `totalSeconds` is `(runEndedAt - runStartedAt)` when both are
+present — literally measured, not the sum of the `phases` column (phases that
+overlap by design — Phase 4 with Phases 2–3, model work with CPU work — make
+the sum larger than reality) and not a manual estimate either. A `time-ledger.json`
+from before this field existed has neither `runStartedAt`/`runEndedAt` nor any
+phase's `startedAt`/`endedAt` — `render-evidence.ps1` renders its Run timeline
+section as `_unavailable — real timestamps not captured this run_` in that case,
+never a fabricated one.
+
+Every phase row SHOULD also carry `startedAt`/`endedAt` (ISO8601 UTC,
+`Get-Date -Format o` / `date -u +%Y-%m-%dT%H:%M:%SZ`) bracketing that phase's
+own work — additive to `seconds`, never a replacement (`seconds` stays the
+number every consumer already reads). A `"consent-wait"` row is appended around
+each consent question (mutation/execution gates) with `actor: "developer (chat
+reply)"` — this is what lets the evidence file separate human answer-latency
+from machine time, so a slow run caused by the developer thinking is never
+misread as agentQ being slow.
 
 **`stall` (optional, present only when the watchdog fired — SKILL.md's
 Background-agent & background-job watchdog section)**: `watchdogFired` (bool),
@@ -839,6 +878,38 @@ ledger rule from the 2026-08-25 incident: an earlier version of this file record
 two stalled dispatches as `0.0 seconds` and hid 52 minutes of real run time from
 the developer). If a stall's exact duration genuinely cannot be reconstructed,
 record the best available estimate and say so in `outcome` — never a bare zero.
+
+## perf-issue.json  (written by scripts/file-perf-issue.ps1, Phase 8 tail — every run)
+```json
+{
+  "checked": true,
+  "thresholdSeconds": 1200,
+  "totalSeconds": 1346.0,
+  "overThreshold": true,
+  "filed": true,
+  "issueUrl": "https://github.com/marianamelo1/agentQ/issues/58",
+  "issueNumber": 58,
+  "reason": null
+}
+```
+Written on EVERY run (the script is always called at the tail of Phase 8 —
+agentQ's own runtime telemetry for the maintainer). The threshold and target
+repo (agentQ's own — never a product repo) are the script's `-ThresholdMinutes`
+and `-TargetRepo` parameter defaults, its single source of truth for both;
+`thresholdSeconds` in the artifact records the value that applied to this run.
+A run under the threshold gets
+`overThreshold:false, filed:false, reason:"under threshold - nothing filed"`
+and nothing else happens. `filed:false` with a `reason` string covers
+every honest non-filing outcome (`"gh CLI not found"`, `"gh not authenticated
+(run: gh auth login)"`, `"gh issue create failed: <stderr, truncated>"`), and
+`checked:false` with a `reason` covers unreadable inputs. The script ALWAYS
+exits 0 — telemetry can never stop or fail the run that called it: it runs
+AFTER the report/evidence files are already written, NEVER
+blocks or delays delivering them, and a failure here is reported to the
+developer as one extra chat line, nothing more. `issueUrl` is the single source of truth
+the evidence file and the closing chat line both cite — never re-derived from
+`issueNumber`. See CLAUDE.md Phase 8 and `.claude/skills/qa-review/SKILL.md`
+for when this runs.
 
 ## report-pack.ps1 output  (stdout only — not a persisted artifact)
 Phase D2 of the run-time reduction work: assembles the inline evidence pack
@@ -872,9 +943,10 @@ no agent). The orchestrator appends `{ "name": "report", "actor":
 "scripts/render-report.ps1", "seconds": <measured>, "outcome": "RAN" }` and
 updates `totalSeconds`, THEN runs `render-evidence.ps1` — so the evidence
 file's phase table includes the report-writing cost. `render-evidence.ps1`
-reads `agentsCalled`/`phases`/`totalSeconds` verbatim into ONE table
-(`Phase | Actor | Seconds | Outcome`) — there is no separate hand-transcribed
-"Run summary" table duplicating the same phase/seconds columns.
+reads `agentsCalled`/`phases`/`totalSeconds`/`runStartedAt`/`runEndedAt`
+verbatim into the evidence file's one and only phase/timing table, "Run
+timeline" (`Phase | Actor | Started | Ended | Seconds | Outcome`) — there is
+no separate hand-transcribed table duplicating the same phase/seconds columns.
 
 ## impact-index.json  (impact-index.ps1 — Phase 1b of every /qa-review + the standalone /qa-impact)
 Static blast-radius index. Never builds, boots, or executes anything; read-only scan
