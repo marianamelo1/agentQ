@@ -11,11 +11,20 @@
 
     Inputs (all read from the run's workspaceDir; every one of them OPTIONAL):
       diff-set.json, diff-coverage.json, test-results.json, mutation-report.json,
-      contract-report.json, adapter-profiles.json  -  plus git churn from the manifest's
-      repoPath. Missing/unreadable inputs make their signals unavailable and the remaining
-      weights RENORMALIZE. WHY never score a missing signal as 0: substituting zero fakes
-      a low-risk verdict off absent evidence  -  the exact dishonesty this tool exists to
+      contract-report.json, adapter-profiles.json, impact-index.json,
+      manual-test-candidates.json  -  plus git churn from the manifest's repoPath. Missing/
+      unreadable inputs make their signals unavailable and the remaining weights
+      RENORMALIZE. WHY never score a missing signal as 0: substituting zero fakes a
+      low-risk verdict off absent evidence  -  the exact dishonesty this tool exists to
       prevent. Missing evidence lowers stated confidence instead.
+
+    Blast-radius signals (crossRepoImpact, uiAutomationExposure, manualTestVolume) are
+    blended into the SAME weighted score as correctness signals, not reported separately:
+    a change that reaches further has more surface for a mistake to cause damage, which is
+    a genuine merge-risk dimension in its own right. They read impact-index.json /
+    manual-test-candidates.json (Phase 1b/1c artifacts, which run in every mode including
+    --quick), so a quick review commonly has these plus testToSourceBalance/churn90d as its
+    only available signals.
 
     GH issue #26: qa-analyst (Phase 4) used to compose analyst-brief.json's gapLattice from
     diff-coverage.json + mutation-report.json, but mutation-report.json is only written here,
@@ -132,6 +141,9 @@ $mut         = Read-JsonArtifact (Join-Path $workspaceDir 'mutation-report.json'
 $contract    = Read-JsonArtifact (Join-Path $workspaceDir 'contract-report.json')
 $adapters    = Read-JsonArtifact (Join-Path $workspaceDir 'adapter-profiles.json')
 $mutantsRaw  = Read-JsonArtifact (Join-Path $workspaceDir 'mutants.json')
+$impactIdx   = Read-JsonArtifact (Join-Path $workspaceDir 'impact-index.json')
+$manualCand  = Read-JsonArtifact (Join-Path $workspaceDir 'manual-test-candidates.json')
+$reviewedRepoSlug = [string](Get-Prop $man 'repoSlug' '')
 
 $adapterProjects = @(Get-Prop $adapters 'projects' @())
 
@@ -218,20 +230,20 @@ foreach ($run in $runs) {
 
 $signals = New-Object 'System.Collections.Generic.List[object]'
 
-# --- s1: 1 - branchDiffCoverage (0.28)  -  only if coverage was not refused ---------------
+# --- s1: 1 - branchDiffCoverage (0.2296)  -  only if coverage was not refused -------------
 $covRefused = $true
 if ($null -ne $diffCov) { $covRefused = [bool](Get-Prop $diffCov 'refused' $false) }
 $bdc = Get-Prop $diffCov 'branchDiffCoverage'
 if ($null -ne $diffCov -and -not $covRefused -and $null -ne $bdc) {
     $s1 = Clamp01 (1.0 - [double]$bdc)
-    $signals.Add([pscustomobject]@{ Name = 'branchDiffCoverage'; Weight = 0.28; Available = $true; Value = [math]::Round([double]$bdc, 4); S = $s1 })
+    $signals.Add([pscustomobject]@{ Name = 'branchDiffCoverage'; Weight = 0.2296; Available = $true; Value = [math]::Round([double]$bdc, 4); S = $s1 })
 } else {
     # refused:true means the numbers were built on broken path mapping  -  CONTRACTS.md
     # forbids reporting them, so they cannot feed a score either.
-    $signals.Add([pscustomobject]@{ Name = 'branchDiffCoverage'; Weight = 0.28; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'branchDiffCoverage'; Weight = 0.2296; Available = $false; Value = $null; S = 0.0 })
 }
 
-# --- s2: surviving business-rule mutants / max(1, run) (0.20) ---------------------------
+# --- s2: surviving business-rule mutants / max(1, run) (0.164) --------------------------
 $brRun = 0
 $brSurvived = 0
 $mutAvailable = $false
@@ -264,12 +276,12 @@ if ($mutAvailable) {
     # run and found no surviving rule mutants; that is genuine evidence, unlike a missing
     # report (which renormalizes instead).
     $s2 = Clamp01 ($brSurvived / [double]([math]::Max(1, $brRun)))
-    $signals.Add([pscustomobject]@{ Name = 'survivingBusinessRuleMutants'; Weight = 0.20; Available = $true; Value = $brSurvived; S = $s2 })
+    $signals.Add([pscustomobject]@{ Name = 'survivingBusinessRuleMutants'; Weight = 0.164; Available = $true; Value = $brSurvived; S = $s2 })
 } else {
-    $signals.Add([pscustomobject]@{ Name = 'survivingBusinessRuleMutants'; Weight = 0.20; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'survivingBusinessRuleMutants'; Weight = 0.164; Available = $false; Value = $null; S = 0.0 })
 }
 
-# --- s3: clamp((maxMethodComplexity(changed) - 5) / 20) (0.14) --------------------------
+# --- s3: clamp((maxMethodComplexity(changed) - 5) / 20) (0.1148) ------------------------
 $complexities = @()
 if ($null -ne $diffCov -and -not $covRefused) {
     foreach ($g in @(Get-Prop $diffCov 'gaps' @())) {
@@ -281,26 +293,26 @@ if ($complexities.Count -gt 0) {
     $maxC = 0.0
     foreach ($cx in $complexities) { if ($cx -gt $maxC) { $maxC = $cx } }
     $s3 = Clamp01 (($maxC - 5.0) / 20.0)
-    $signals.Add([pscustomobject]@{ Name = 'changedMethodComplexity'; Weight = 0.14; Available = $true; Value = [math]::Round($maxC, 2); S = $s3 })
+    $signals.Add([pscustomobject]@{ Name = 'changedMethodComplexity'; Weight = 0.1148; Available = $true; Value = [math]::Round($maxC, 2); S = $s3 })
 } else {
     # Unavailable when coverage is missing/refused OR every gap has null complexity
     # (spec: "unavailable if all null"). A refused coverage report cannot lend us its
     # gap list either  -  same broken path mapping underneath.
-    $signals.Add([pscustomobject]@{ Name = 'changedMethodComplexity'; Weight = 0.14; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'changedMethodComplexity'; Weight = 0.1148; Available = $false; Value = $null; S = 0.0 })
 }
 
-# --- s4: log10(1 + changedExecutableLines) / log10(501) (0.12) --------------------------
+# --- s4: log10(1 + changedExecutableLines) / log10(501) (0.0984) ------------------------
 $cel = Get-Prop $diffCov 'changedExecutableLines'
 if ($null -ne $diffCov -and -not $covRefused -and $null -ne $cel) {
     # Log scale: the risk difference between 10 and 100 changed lines matters more than
     # between 400 and 500; saturates at 500 lines (log10(501) denominator -> s4 = 1).
     $s4 = Clamp01 ([math]::Log10(1.0 + [double]$cel) / [math]::Log10(501.0))
-    $signals.Add([pscustomobject]@{ Name = 'changedExecutableLines'; Weight = 0.12; Available = $true; Value = [int]$cel; S = $s4 })
+    $signals.Add([pscustomobject]@{ Name = 'changedExecutableLines'; Weight = 0.0984; Available = $true; Value = [int]$cel; S = $s4 })
 } else {
-    $signals.Add([pscustomobject]@{ Name = 'changedExecutableLines'; Weight = 0.12; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'changedExecutableLines'; Weight = 0.0984; Available = $false; Value = $null; S = 0.0 })
 }
 
-# --- s5: contract findings  -  1.0 any ERR, 0.4 only WARN, 0 clean (0.12) -----------------
+# --- s5: contract findings  -  1.0 any ERR, 0.4 only WARN, 0 clean (0.0984) ---------------
 $contractSkipped = $true
 if ($null -ne $contract) { $contractSkipped = [bool](Get-Prop $contract 'skipped' $false) }
 if ($null -ne $contract -and -not $contractSkipped) {
@@ -310,14 +322,14 @@ if ($null -ne $contract -and -not $contractSkipped) {
     $hasWarn = (@($breaking | Where-Object { [string](Get-Prop $_ 'level' '') -eq 'WARN' }).Count -gt 0) -or ($warnArr.Count -gt 0)
     $s5 = 0.0
     if ($hasErr) { $s5 = 1.0 } elseif ($hasWarn) { $s5 = 0.4 }
-    $signals.Add([pscustomobject]@{ Name = 'contractBreaking'; Weight = 0.12; Available = $true; Value = $s5; S = $s5 })
+    $signals.Add([pscustomobject]@{ Name = 'contractBreaking'; Weight = 0.0984; Available = $true; Value = $s5; S = $s5 })
 } else {
     # Lane skipped (or no report): renormalize. WHY: "no contract lane ran" must never
     # read as "contract clean".
-    $signals.Add([pscustomobject]@{ Name = 'contractBreaking'; Weight = 0.12; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'contractBreaking'; Weight = 0.0984; Available = $false; Value = $null; S = 0.0 })
 }
 
-# --- s6: test-vs-source balance from diff-set paths (0.09) ------------------------------
+# --- s6: test-vs-source balance from diff-set paths (0.0738) ----------------------------
 if ($null -ne $diffSet) {
     $srcFiles  = @()
     $testFiles = @()
@@ -354,12 +366,12 @@ if ($null -ne $diffSet) {
     if ($verifiedGeneratedCount -gt 0) {
         $s6 = Clamp01 ($s6 - (0.5 * [double]$verifiedGeneratedCount))
     }
-    $signals.Add([pscustomobject]@{ Name = 'testToSourceBalance'; Weight = 0.09; Available = $true; Value = [math]::Round([double]$s6, 4); S = $s6 })
+    $signals.Add([pscustomobject]@{ Name = 'testToSourceBalance'; Weight = 0.0738; Available = $true; Value = [math]::Round([double]$s6, 4); S = $s6 })
 } else {
-    $signals.Add([pscustomobject]@{ Name = 'testToSourceBalance'; Weight = 0.09; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'testToSourceBalance'; Weight = 0.0738; Available = $false; Value = $null; S = 0.0 })
 }
 
-# --- s7: churn  -  clamp(distinct commits touching changed files in 90d / 40) (0.05) ------
+# --- s7: churn  -  clamp(distinct commits touching changed files in 90d / 40) (0.041) -----
 $s7Available = $false
 $churnCommits = 0
 if ($null -ne $diffSet -and -not [string]::IsNullOrWhiteSpace($repoPath) -and (Test-Path -LiteralPath $repoPath)) {
@@ -405,9 +417,85 @@ if ($null -ne $diffSet -and -not [string]::IsNullOrWhiteSpace($repoPath) -and (T
 }
 if ($s7Available) {
     $s7 = Clamp01 ($churnCommits / 40.0)
-    $signals.Add([pscustomobject]@{ Name = 'churn90d'; Weight = 0.05; Available = $true; Value = $churnCommits; S = $s7 })
+    $signals.Add([pscustomobject]@{ Name = 'churn90d'; Weight = 0.041; Available = $true; Value = $churnCommits; S = $s7 })
 } else {
-    $signals.Add([pscustomobject]@{ Name = 'churn90d'; Weight = 0.05; Available = $false; Value = $null; S = 0.0 })
+    $signals.Add([pscustomobject]@{ Name = 'churn90d'; Weight = 0.041; Available = $false; Value = $null; S = 0.0 })
+}
+
+# --- s8/s9/s10: blast radius -- cross-repo / UI-automation / manual-test reach (0.18 total)
+# WHY these belong in the SAME score as s1-s7, not a separate indicator: a change that
+# reaches further has more surface for a mistake to cause damage, which is a genuine
+# merge-risk dimension even when the diff itself reads as low-complexity. All three read
+# impact-index.json / manual-test-candidates.json -- artifacts from Phase 1b/1c, which run
+# in EVERY mode including --quick, so these three are commonly the only non-execution
+# signals available on a quick review (alongside s6/s7 above and s5 when the contract gate
+# opened on a committed-spec path). Availability is gated on "did the phase actually run",
+# never on "0 matches" -- a real 0 is available evidence (S=0), same pattern as s2's
+# mutAvailable. impact-index.ps1 always writes its file when invoked (even at 0 seeds), so
+# file existence IS the phase-ran signal for s8/s9; manual-test-candidates.json additionally
+# gates on status "RAN" (its own honest SKIPPED/DEGRADED strings must never masquerade as a
+# real "0 candidates" reading -- see CONTRACTS.md).
+
+# --- s8: distinct OTHER product repos with >=1 code-symbol match (0.06) -----------------
+$crossRepoAvailable = $false
+$distinctOtherRepos = 0
+if ($null -ne $impactIdx) {
+    $crossRepoAvailable = $true
+    $otherRepoSlugs = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($mtc in @(Get-Prop $impactIdx 'matches' @())) {
+        if ([bool](Get-Prop $mtc 'indexOnly' $false)) { continue }  # testRepos matches feed s9, not s8
+        $rs = [string](Get-Prop $mtc 'repoSlug' '')
+        if ($rs -and $rs -ne $reviewedRepoSlug) { $null = $otherRepoSlugs.Add($rs) }
+    }
+    $distinctOtherRepos = $otherRepoSlugs.Count
+}
+if ($crossRepoAvailable) {
+    # 3+ distinct other product repos referencing this diff's own symbols maxes the signal.
+    $s8 = Clamp01 ($distinctOtherRepos / 3.0)
+    $signals.Add([pscustomobject]@{ Name = 'crossRepoImpact'; Weight = 0.06; Available = $true; Value = $distinctOtherRepos; S = $s8 })
+} else {
+    $signals.Add([pscustomobject]@{ Name = 'crossRepoImpact'; Weight = 0.06; Available = $false; Value = $null; S = 0.0 })
+}
+
+# --- s9: distinct UI-automation (testRepos) files with >=1 match (0.06) -----------------
+$uiAutoAvailable = $false
+$distinctUiFiles = 0
+if ($null -ne $impactIdx) {
+    $uiAutoAvailable = $true
+    $uiFiles = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($mtc in @(Get-Prop $impactIdx 'matches' @())) {
+        if (-not [bool](Get-Prop $mtc 'indexOnly' $false)) { continue }
+        $rf = "$([string](Get-Prop $mtc 'repoSlug' ''))|$([string](Get-Prop $mtc 'file' ''))"
+        $null = $uiFiles.Add($rf)
+    }
+    $distinctUiFiles = $uiFiles.Count
+}
+if ($uiAutoAvailable) {
+    # 5+ distinct UI-automation spec files touching this diff's symbols maxes the signal.
+    $s9 = Clamp01 ($distinctUiFiles / 5.0)
+    $signals.Add([pscustomobject]@{ Name = 'uiAutomationExposure'; Weight = 0.06; Available = $true; Value = $distinctUiFiles; S = $s9 })
+} else {
+    $signals.Add([pscustomobject]@{ Name = 'uiAutomationExposure'; Weight = 0.06; Available = $false; Value = $null; S = 0.0 })
+}
+
+# --- s10: manual-test candidate volume (0.06) -------------------------------------------
+$manualAvailable = $false
+$manualCount = 0
+if ($null -ne $manualCand) {
+    $mStatus = [string](Get-Prop $manualCand 'status' '')
+    if ($mStatus -eq 'RAN') {
+        # SKIPPED/DEGRADED strings must never be read as "0 candidates" -- only a genuine
+        # completed query counts as available evidence, per CONTRACTS.md.
+        $manualAvailable = $true
+        $manualCount = @(Get-Prop $manualCand 'candidates' @()).Count
+    }
+}
+if ($manualAvailable) {
+    # 5+ manual-test candidates maxes the signal.
+    $s10 = Clamp01 ($manualCount / 5.0)
+    $signals.Add([pscustomobject]@{ Name = 'manualTestVolume'; Weight = 0.06; Available = $true; Value = $manualCount; S = $s10 })
+} else {
+    $signals.Add([pscustomobject]@{ Name = 'manualTestVolume'; Weight = 0.06; Available = $false; Value = $null; S = 0.0 })
 }
 
 # ---------------------------------------------------------------------------------------
