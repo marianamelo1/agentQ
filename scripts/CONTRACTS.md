@@ -150,7 +150,15 @@ never as a pass.
   "levels": { "backend": true, "frontend": false, "apiSurface": true }
 }
 ```
-`levels` is filled in by qa-intake (not the script) after classification.
+`levels` is filled in by qa-intake (not the script) after classification — it is
+only ever trustworthy immediately after a qa-intake dispatch. `-DiffSet` itself
+always writes placeholder `false`s UNLESS a prior `diff-set.json` already on disk
+has byte-identical `baseSha`/`files`/`untracked` to this run's, in which case it
+carries that prior file's `levels` forward instead of clobbering it (GH issue
+#57) — this only preserves a real classification across a legitimate
+cache-reuse run where qa-intake is skipped because nothing changed; any actual
+diff change still resets to placeholders and requires a fresh qa-intake
+dispatch to repopulate them.
 
 ## adapter-profiles.json  (qa-intake writes; run-tests/stryker scripts read)
 One entry per affected **test project**:

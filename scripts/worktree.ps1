@@ -841,19 +841,47 @@ function Invoke-ModeDiffSet {
     $allUntracked = Get-DevUntrackedFiles -Repo $repo
     $untracked = @($allUntracked | Where-Object { $_ -notmatch $excludeRx })
 
-    $diffSet = [ordered]@{
-        baseSha   = $baseSha
-        files     = $files
-        untracked = $untracked
-        # Initialized all-false: classification is judgment work  -  qa-intake fills these in.
-        # The script only guarantees the keys exist so consumers never null-check.
-        levels    = [ordered]@{ backend = $false; frontend = $false; apiSurface = $false }
-    }
-
     if (-not (Test-Path -LiteralPath $m.workspaceDir)) {
         New-Item -ItemType Directory -Force -Path $m.workspaceDir | Out-Null
     }
     $outPath = Join-Path $m.workspaceDir 'diff-set.json'
+
+    # INVARIANT: `levels` is judgment work  -  only a qa-intake dispatch is a trustworthy source
+    # for it. This script only guarantees the keys exist so consumers never null-check, defaulting
+    # to all-false. -DiffSet re-runs on every preflight (Phase 0) even on a cache-reuse run where
+    # the orchestrator legitimately skips re-dispatching qa-intake because nothing changed  -
+    # resetting `levels` to placeholders in that case would clobber the real classification a prior
+    # qa-intake run already wrote (GH issue #57). So: carry the prior file's `levels` forward, but
+    # ONLY when this run's files/untracked/baseSha are byte-identical to what's already on disk  -
+    # any real diff change still resets to placeholders and requires a fresh qa-intake dispatch.
+    $levels = [ordered]@{ backend = $false; frontend = $false; apiSurface = $false }
+    if (Test-Path -LiteralPath $outPath) {
+        try {
+            $prior = Get-Content -LiteralPath $outPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $priorComparable = [ordered]@{ baseSha = $prior.baseSha; files = $prior.files; untracked = $prior.untracked }
+            $newComparable   = [ordered]@{ baseSha = $baseSha;       files = $files;       untracked = $untracked }
+            $priorJson = $priorComparable | ConvertTo-Json -Depth 20 -Compress
+            $newJson   = $newComparable   | ConvertTo-Json -Depth 20 -Compress
+            if ($priorJson -eq $newJson -and $prior.levels) {
+                $levels = [ordered]@{
+                    backend    = [bool]$prior.levels.backend
+                    frontend   = [bool]$prior.levels.frontend
+                    apiSurface = [bool]$prior.levels.apiSurface
+                }
+            }
+        }
+        catch {
+            # Corrupt/unreadable prior diff-set.json  -  fall back to placeholder levels rather
+            # than throwing; a fresh qa-intake dispatch will re-populate them as normal.
+        }
+    }
+
+    $diffSet = [ordered]@{
+        baseSha   = $baseSha
+        files     = $files
+        untracked = $untracked
+        levels    = $levels
+    }
     Write-JsonFile -Object $diffSet -Path $outPath
     Write-Output "DiffSet: $($files.Count) changed file(s), $hunkTotal hunk(s), $($untracked.Count) untracked -> $outPath"
 }
