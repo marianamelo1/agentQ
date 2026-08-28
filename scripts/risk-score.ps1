@@ -238,7 +238,6 @@ $mutAvailable = $false
 if ($null -ne $mut) {
     $filesMap = Get-Prop $mut 'files'
     if ($null -ne $filesMap) {
-        $mutAvailable = $true
         foreach ($fp in $filesMap.PSObject.Properties) {
             foreach ($m in @(Get-Prop $fp.Value 'mutants' @())) {
                 $mn = [string](Get-Prop $m 'mutatorName' '')
@@ -256,6 +255,10 @@ if ($null -ne $mut) {
         }
     }
 }
+# Available only when at least one business-rule mutant was actually evaluated
+# (Killed/Survived/Timeout)  -  a files{} map full of Ignored/NoCoverage/CompileError
+# is, evidentially, no different from a missing report (GH issue #42).
+if ($brRun -gt 0) { $mutAvailable = $true }
 if ($mutAvailable) {
     # max(1, run): a report with zero business-rule mutants scores 0 here  -  mutation DID
     # run and found no surviving rule mutants; that is genuine evidence, unlike a missing
