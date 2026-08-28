@@ -414,7 +414,11 @@ an omitted row — and no impact artifacts are expected. Otherwise:
 `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>`: seeds extracted from
 the diff set (routes, symbols, DTOs, migration tables/columns), scanned across
 `productRepos` ∪ `testRepos` — the UI-automation (BA) repo lives in the
-latter — into `impact-index.json`. If `skipQaImpact` itself is `false`, the
+latter — into `impact-index.json`. The same pass also extracts `domainKeywords`
+(page/feature folder names + i18n string-literal values from changed lines) — a
+business-language sibling to the code-symbol `seeds`, kept out of the cross-repo
+scan itself (a plain English word would be pure noise there) and consumed only by
+Phase 1c's manual-test query. If `skipQaImpact` itself is `false`, the
 orchestrator also consults Testomat for cross-repo candidates: probe whether a
 Testomatio MCP is available in THIS session (pre-declared in `.mcp.json`, but its
 token is per-machine — never assume it works from connectivity alone; the probe
@@ -443,14 +447,22 @@ the Impact map display). Toggle `true` → `SKIPPED — disabled by config
 MCP probe as Phase 1b — the real query classifies the lane, not a bare
 connectivity check; no MCP → `manual-test-candidates.json` with `status:
 "SKIPPED — Testomatio MCP not configured"`; read-only-token 403 → `status:
-"DEGRADED — Testomatio token is read-only"`. Otherwise → two TQL queries, both
-filtered to `state == 'manual'` (Testomat's own field distinguishing manual from
-automated test records — verified live against the real project): one OR-ing the
-(low-signal-filtered) seed values, one on `jira == '<ticketKey>'` when a ticket key
-exists. Rank seed matches (`matchedBy: "diff-seed"` — the manual test's own text
-mentions the changed code) above ticket-only matches (`matchedBy: "ticket-link"` —
-filed under the same ticket, weaker evidence); cap at 5 shown, `+N more` pointing at
-`manual-test-candidates.json`. Same honesty rules as every other Testomat hit:
+"DEGRADED — Testomatio token is read-only"`. Otherwise → up to three TQL queries,
+all filtered to `state == 'manual'` (Testomat's own field distinguishing manual
+from automated test records — verified live against the real project): a
+**domain-keyword query** ANDing the page-keyword OR-group against the
+value-keyword OR-group from `impact-index.json`'s `domainKeywords` (a manual
+test is titled in business language, e.g. "Processed Registrations and
+Expenses" — it shares no text with a code symbol, so a code-symbol-only query
+misses it outright; page-only is too broad — a whole feature area — value-only
+too broad the other way, the AND of both is what narrows to the genuinely
+relevant tests), a **code-symbol seed query** OR-ing the (low-signal-filtered)
+`seeds` values, and one on `jira == '<ticketKey>'` when a ticket key exists.
+Rank a hit from either of the first two (`matchedBy: "diff-seed"` — the manual
+test's own text matches the changed code) above a ticket-only hit (`matchedBy:
+"ticket-link"` — filed under the same ticket, weaker evidence); cap at 5
+shown, `+N more` pointing at `manual-test-candidates.json`. Same honesty rules
+as every other Testomat hit:
 **candidates (keyword/ticket match)**, never "this needs testing" asserted as fact.
 Feeds qa-analyst and the report's own Manual testing section — visible near the
 verdict, not buried in Full Evidence (see Reporting).
@@ -623,10 +635,20 @@ run has finished.
    mutation-testing-elements JSON. JS side: StrykerJS + jest-runner, `--incremental`.
 `-Deep` opt-in: Standard level, whole files, no scoping.
 
-### Phase 6 — Risk score (script, <1 s)
+### Phase 6 — Risk score (script, <1 s; runs in EVERY mode, including `--quick`)
 `scripts/risk-score.ps1` — deterministic weighted formula + hard overrides; missing
 signals renormalize the weights (never a silent zero) and lower the stated
-confidence.
+confidence. Ten signals total: the four execution-dependent ones (coverage,
+surviving mutants, method complexity, changed-line volume), contract-breaking
+(available whenever Phase 1's committed-spec/ocelot check ran), and five that
+need no execution at all — test-to-source balance, git churn, and three
+blast-radius signals (`crossRepoImpact`, `uiAutomationExposure`,
+`manualTestVolume`, read from Phase 1b/1c's own artifacts) blended into the same
+score: a change that reaches further has more surface for a mistake to cause
+damage, a genuine merge-risk dimension alongside correctness-likelihood. A
+`--quick` run therefore still gets a real band (`confidence: "low"`, most
+signals in `missingSignals`) instead of "couldn't check" — it just runs right
+after Phase 1c instead of after the mutation merge.
 
 ### 💬 Consent: execution
 Asked as part of the combined post-intake consent (see above), outbound
@@ -820,7 +842,15 @@ cut, don't compress; overflow goes to the evidence file):
 **⚖️ Merge risk: <band>** — one plain sentence why.
 
 ## ❓ Questions for the team          (max 3; full set in the evidence file)
-## 🖐️ Worth checking by hand         (only when Phase 1c found candidates; ≤3)
+## 🖐️ Worth checking by hand         (only when Phase 1c found candidates; ≤3;
+                                     each bullet is the real product scenario
+                                     the test validates, in plain language —
+                                     never the search-match mechanics — ending
+                                     with a "[Check this scenario](<Testomat
+                                     URL>)" link. This is the one deliberate
+                                     exception to "no links except the bottom
+                                     evidence pointer": a manual test's own URL
+                                     is an actionable next step, not jargon)
 ## 🔍 What was checked               (one table: plain question per row, ✅/⚠️/❌/⏭️)
 ## 🧪 Ready-made tests (N) — keep them?   (numbered one-liners, no paths)
 📄 Full technical detail: [<name>-evidence.md](<name>-evidence.md)   (relative markdown link, not just the filename)
@@ -887,7 +917,8 @@ everything the main report dropped, at full rigor:
   (failed this run — each with its verbatim rerun command, confirmed only by the
   developer's own re-run outside agentQ)*.
 - Risk score: signal ledger + methodology ("heuristic scored from this diff
-  only; not calibrated against CI history"); missing signals show as reduced
+  only, including how far it reaches into other repos/UI-automation/manual
+  tests; not calibrated against CI history"); missing signals show as reduced
   confidence, never silently absent.
 
 ## Subagents

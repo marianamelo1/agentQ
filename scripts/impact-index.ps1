@@ -135,9 +135,45 @@ function Get-SeedsFromFile {
         [Parameter(Mandatory = $true)][string]$RelPath,
         # WHY AllowEmptyCollection: a diff-set.json entry can legitimately have zero hunks
         # (e.g. a rename with no content change) -- that must not be a binding error.
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hunks
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hunks,
+        # Domain keywords -- a SEPARATE, business-language sibling to the code-symbol seeds
+        # this function already extracts. WHY separate: code seeds (route/class/DTO names)
+        # feed cross-repo CODE matching, where a plain English word would be pure noise; a
+        # manual/QA test title ("Processed Registrations and Expenses") is written in
+        # business language and never contains a symbol name, so it needs its own lane. Two
+        # HashSets are accumulated across every changed file by the caller (not returned),
+        # same mutate-by-reference pattern .NET collections already give us for free.
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$PageKeywords,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.HashSet[string]]$ValueKeywords
     )
     $seeds = New-Object System.Collections.Generic.List[object]
+
+    # Page/feature keywords -- from the file's own directory segments, independent of which
+    # lines changed (the folder IS the feature: pages/registrations, pages/expenses). A
+    # stoplist drops generic structural directory names that would otherwise match everything.
+    $StopSegments = @(
+        'src', 'lib', 'libs', 'app', 'apps', 'page', 'pages', 'component', 'components',
+        'module', 'modules', 'feature', 'features', 'dist', 'node_modules', 'test', 'tests',
+        '__tests__', 'spec', 'common', 'shared', 'util', 'utils', 'helper', 'helpers', 'core',
+        'ui', 'api', 'asset', 'assets', 'style', 'styles', 'store', 'stores', 'hook', 'hooks',
+        'type', 'types', 'model', 'models', 'service', 'services', 'view', 'views', 'layout',
+        'layouts'
+    )
+    # Only the SINGLE deepest qualifying segment (the immediate parent directory) -- an
+    # ancestor like "payroll" two levels further up names the whole product area, not this
+    # feature, and is too broad to search on (verified live: including it pulled in
+    # loosely-related hits from across the entire module alongside the two genuinely
+    # relevant tests). Stop at the first qualifying segment found walking upward, even if
+    # stoplisted layers were skipped to reach it -- depth in the stoplist-filtered sense,
+    # not "2 keywords no matter how far up they came from".
+    $pathSegments = $RelPath -split '/'
+    for ($i = $pathSegments.Count - 2; $i -ge 0; $i--) {
+        $segLower = $pathSegments[$i].ToLowerInvariant()
+        if ($segLower.Length -ge 4 -and $StopSegments -notcontains $segLower -and $segLower -cmatch '^[a-z0-9-]+$') {
+            $null = $PageKeywords.Add($segLower)
+            break
+        }
+    }
     # WHY DirectorySeparatorChar, not a literal '\': $RelPath comes from git (always
     # '/') -- on Windows this yields native backslash paths as before; on macOS/Linux
     # it's an identity transform, so the already-native '/' paths pass through intact
@@ -168,10 +204,14 @@ function Get-SeedsFromFile {
         $startLine = [int](Get-Prop $hunk 'newStart' 1)
         $count     = [int](Get-Prop $hunk 'newCount' 0)
         if ($count -le 0) { continue }  # pure deletion -- nothing new to extract a seed from
-        # Pad 2 lines each side: an attribute/decorator commonly sits just above the line a
-        # hunk reports as changed (e.g. [HttpGet] above the method signature it decorates).
-        $from = [math]::Max(1, $startLine - 2)
-        $to   = [math]::Min($lines.Count, $startLine + $count - 1 + 2)
+        # Pad 8 lines each side: an attribute/decorator commonly sits just above the line a
+        # hunk reports as changed (e.g. [HttpGet] above the method signature it decorates),
+        # and a multi-line function signature (several parameters, one per line) can push the
+        # declaration keyword itself well more than 2 lines above the first changed body line
+        # -- verified live: a hunk starting inside a 4-parameter TS function body missed its
+        # own `export function` line entirely at pad=2, yielding 0 seeds for the whole file.
+        $from = [math]::Max(1, $startLine - 8)
+        $to   = [math]::Min($lines.Count, $startLine + $count - 1 + 8)
         for ($ln = $from; $ln -le $to; $ln++) {
             $text = $lines[$ln - 1]
 
@@ -208,6 +248,23 @@ function Get-SeedsFromFile {
             }
             if ($text -match '^\s*export\s+(?:const|function)\s+(\w+)') {
                 $seeds.Add([ordered]@{ kind = 'symbol'; value = $Matches[1]; from = "$RelPath`:$ln" })
+            }
+
+            # Value keywords -- string literals passed to an i18n/translation call on a
+            # CHANGED line only (unlike page keywords above, these track what actually
+            # changed, e.g. a status label swapping from "Processed" to "Approved").
+            # Template-literal form: t`...` (interpolations stripped before word-splitting).
+            foreach ($tm in [regex]::Matches($text, 't`([^`]*)`')) {
+                $lit = $tm.Groups[1].Value -replace '\$\{[^}]*\}', ' '
+                foreach ($w in ($lit -split '[^a-zA-Z]+')) {
+                    if ($w.Length -ge 4) { $null = $ValueKeywords.Add($w.ToLowerInvariant()) }
+                }
+            }
+            # Call form: t('...') / t("...").
+            foreach ($tm in [regex]::Matches($text, 't\(\s*[''"]([^''"]*)[''"]\s*\)')) {
+                foreach ($w in ($tm.Groups[1].Value -split '[^a-zA-Z]+')) {
+                    if ($w.Length -ge 4) { $null = $ValueKeywords.Add($w.ToLowerInvariant()) }
+                }
             }
         }
     }
@@ -359,6 +416,10 @@ try {
 
     $mode = 'branch'
     $rawSeeds = New-Object System.Collections.Generic.List[object]
+    # Domain keywords: empty in target mode (no diff to derive folder/literal context from) --
+    # only ever populated by Get-SeedsFromFile below, in branch mode.
+    $domainPageKeywords = New-Object System.Collections.Generic.HashSet[string]
+    $domainValueKeywords = New-Object System.Collections.Generic.HashSet[string]
 
     if (-not [string]::IsNullOrWhiteSpace($Targets)) {
         $mode = 'target'
@@ -381,7 +442,7 @@ try {
             $relPath = [string](Get-Prop $f 'path' '')
             if ([string]::IsNullOrWhiteSpace($relPath)) { continue }
             $hunks = @(Get-Prop $f 'hunks' @())
-            foreach ($s in (Get-SeedsFromFile -RepoPath $repoPath -RelPath $relPath -Hunks $hunks)) { $rawSeeds.Add($s) }
+            foreach ($s in (Get-SeedsFromFile -RepoPath $repoPath -RelPath $relPath -Hunks $hunks -PageKeywords $domainPageKeywords -ValueKeywords $domainValueKeywords)) { $rawSeeds.Add($s) }
         }
     }
 
@@ -471,10 +532,17 @@ try {
         }
     }
 
+    # Cap + sort for determinism (HashSet enumeration order is not guaranteed stable).
+    $domainKeywordsOut = [ordered]@{
+        page  = @($domainPageKeywords | Sort-Object | Select-Object -First 8)
+        value = @($domainValueKeywords | Sort-Object | Select-Object -First 8)
+    }
+
     $outObj = [ordered]@{
         mode            = $mode
         seeds           = $finalSeeds
         droppedSeeds    = $droppedSeeds
+        domainKeywords  = $domainKeywordsOut
         matches         = $matchList
         matchStats      = $matchStats
         reverseCoverage = $reverseCoverage
@@ -488,7 +556,7 @@ try {
     foreach ($s in $scanned) { $secondsTotal += [double]$s.seconds }
     $capNote = ''
     if ($matchStats.Count -gt 0) { $capNote = " - $($matchStats.Count) seed(s) truncated at $MaxMatchesPerSeed matches (see matchStats)" }
-    Write-Output "impact-index: indexed $($scanned.Count) repo(s) in $([math]::Round($secondsTotal, 1))s - $($matchList.Count) reference(s) to $($finalSeeds.Count) seed(s) ($($droppedSeeds.Count) dropped as low-signal)$capNote -> $outPath"
+    Write-Output "impact-index: indexed $($scanned.Count) repo(s) in $([math]::Round($secondsTotal, 1))s - $($matchList.Count) reference(s) to $($finalSeeds.Count) seed(s) ($($droppedSeeds.Count) dropped as low-signal), $($domainKeywordsOut.page.Count) page + $($domainKeywordsOut.value.Count) value domain keyword(s)$capNote -> $outPath"
     exit 0
 }
 catch {

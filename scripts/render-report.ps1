@@ -341,7 +341,12 @@ else {
     $bits = New-Object 'System.Collections.Generic.List[string]'
     if ($fanIn -ne '') { $bits.Add($fanIn.TrimEnd('.')) } elseif ($null -ne $impactIndex) { $bits.Add('impact scan ran (candidates only — a search isn''t proof nothing else is affected)') }
     if ($null -ne $manualTests) {
-        if ($manualCandCount -gt 0) { $bits.Add("$manualCandCount manual test(s) look worth running by hand — see below") }
+        # Curated count (qa-analyst's manualTesting[], which already dropped any keyword hit
+        # whose own scenario doesn't genuinely relate to this diff) - not the raw candidate
+        # count, which can include matches the analyst judged not worth surfacing.
+        $manualCuratedCount = @(Get-Prop $brief 'manualTesting' @()).Count
+        if ($manualCuratedCount -gt 0) { $bits.Add("$manualCuratedCount manual test(s) look worth running by hand — see below") }
+        elseif ($manualCandCount -gt 0) { $bits.Add("$manualCandCount manual test candidate(s) found, none judged directly relevant enough to run by hand — see evidence file") }
         elseif ($manualStatus -like 'SKIPPED*' -or $manualStatus -like 'DEGRADED*') { $bits.Add("manual-test lookup: $manualStatus") }
         else { $bits.Add('no manual-test suggestions came up') }
     }
@@ -451,6 +456,11 @@ if (@($selQuestions).Count -gt 0) {
     Add-Line ''
 }
 
+$manualUrlById = @{}
+foreach ($mc in @(Get-Prop $manualTests 'candidates' @())) {
+    $mcId = [string](Get-Prop $mc 'id' '')
+    if ($mcId -ne '') { $manualUrlById[$mcId] = [string](Get-Prop $mc 'url' '') }
+}
 $manualShown = @($manualFromBrief | Select-Object -First 3)
 if (@($manualShown).Count -gt 0) {
     Add-Line '## 🖐️ Worth checking by hand'
@@ -458,7 +468,13 @@ if (@($manualShown).Count -gt 0) {
     foreach ($mt in $manualShown) {
         $why = [string](Get-Prop $mt 'why' '')
         $title = [string](Get-Prop $mt 'title' '')
-        if ($why -ne '') { Add-Line "- $why" } else { Add-Line "- $title" }
+        $mtId = [string](Get-Prop $mt 'id' '')
+        $line = if ($why -ne '') { $why } else { $title }
+        $url = if ($manualUrlById.ContainsKey($mtId)) { $manualUrlById[$mtId] } else { '' }
+        if ($url -ne '') {
+            $line = "$($line.TrimEnd('.', ' ')). [Check this scenario]($url)."
+        }
+        Add-Line "- $line"
     }
     $moreCount = @($manualFromBrief).Count - @($manualShown).Count
     if ($manualCandCount -gt @($manualFromBrief).Count) { $moreCount = $manualCandCount - @($manualShown).Count }

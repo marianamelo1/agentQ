@@ -69,12 +69,19 @@ intent, then map onto these four slots:
 - Ticket key, if not otherwise given, is still extracted from the branch/commits by
   `qa-intake` in step 2 — `--ticket` only short-circuits that extraction.
 - **`--quick`** (or plain language: "quick review", "static only") — run steps
-  1–2c + the committed-spec contract diff + `qa-analyst` + the report ONLY: no
-  unit execution, no mutation, no generated-test execution. Every
-  execution-dependent claim is graded honestly (`APPEARS MET — static reading
-  only`; the 🔍 table's unit/mutation/execution rows read `SKIPPED — quick mode`,
-  never a pass), the report header names the mode, and both consent gates are
-  skipped as `SKIPPED — quick mode`. Offer the full run as the follow-up.
+  1–2c + the committed-spec contract diff + `qa-analyst` + **step 6 (risk
+  score)** + the report ONLY: no unit execution, no mutation, no
+  generated-test execution. Risk-score.ps1 still runs under `--quick` — it
+  degrades honestly on its own (missing execution-dependent signals
+  renormalize, `confidence: "low"`), and `testToSourceBalance`/`churn90d`
+  (pure diff/git, no execution) plus `crossRepoImpact`/`uiAutomationExposure`/
+  `manualTestVolume` (from step 2b/2c's artifacts, which always run in
+  `--quick` too) are commonly available — so merge risk reads a real band, not
+  a blanket "couldn't check". Every other execution-dependent claim is graded
+  honestly (`APPEARS MET — static reading only`; the 🔍 table's unit/mutation/
+  execution rows read `SKIPPED — quick mode`, never a pass), the report header
+  names the mode, and both consent gates are skipped as `SKIPPED — quick
+  mode`. Offer the full run as the follow-up.
 
 ## Background-agent & background-job watchdog (applies to every dispatch below)
 
@@ -371,18 +378,47 @@ not reporting) — capture both, don't conflate them.
    Impact row only, nothing else.
 2c. **Manual test recommendation (gated by `toggles.skipManualTestAnalysis`,
    default `false` — opt-**out**, unlike 2b which is opt-in)** — needs step 2b's
-   seeds (`impact-index.json`, which ran above even if `skipQaImpact` skipped the
-   Impact map itself). Toggle `true` → record `SKIPPED — disabled by config
-   (skipManualTestAnalysis)` and skip. Otherwise, same Testomatio MCP probe as 2b
-   (real query, not connectivity); available → two TQL queries, both `state ==
-   'manual'`: one OR-ing the seed
-   values, one on `jira == '<ticketKey>'` if a ticket key exists → write
-   `manual-test-candidates.json`, ranking seed matches (`diff-seed`) above
-   ticket-only matches (`ticket-link`), capped at 5. No MCP → the same file
-   with `status: "SKIPPED — Testomatio MCP not configured"`; read-only-token 403 →
-   `status: "DEGRADED — Testomatio token is read-only"`. Stream one line
-   ("Manual testing: 2 candidates — see report"). Overlaps step 3; a failure here
-   degrades this lane only.
+   seeds AND `domainKeywords` (`impact-index.json`, which ran above even if
+   `skipQaImpact` skipped the Impact map itself). Toggle `true` → record
+   `SKIPPED — disabled by config (skipManualTestAnalysis)` and skip. Otherwise,
+   same Testomatio MCP probe as 2b (real query, not connectivity); available →
+   up to THREE TQL queries against `mcp__testomatio__tests_search`, all scoped
+   `state == 'manual'`:
+   1. **Domain-keyword query** (fixes GH: a manual test titled in plain
+      business language, e.g. "Processed Registrations and Expenses", shares
+      no text with a code symbol — verified live that a code-symbol-only seed
+      query missed it outright). Read `impact-index.json`'s `domainKeywords`
+      (`{page: [...], value: [...]}`). Both groups non-empty → AND the two
+      OR-groups: `(test % 'p1' or test % 'p2' ...) and (test % 'v1' or test %
+      'v2' ...)` — page keywords alone are too broad (a whole feature area),
+      value keywords alone too broad the other way (generic status words), the
+      combination is what narrows to the actually-relevant tests (verified
+      live: page-only returned 12 hits across an entire feature area,
+      page+value narrowed to 2, both genuinely relevant). Only one group
+      populated → OR that group alone. Neither → skip this query.
+   2. **Code-symbol seed query** (unchanged from before): OR the `seeds` array
+      values (kind=symbol/endpoint/dto/table/column, low-signal ones already
+      dropped by `impact-index.ps1`) — still worth running alongside the
+      keyword query when seeds exist, since an exact symbol/endpoint mention
+      in a test's own text is stronger evidence than a keyword match.
+   3. **Ticket-link query**: `jira == '<ticketKey>'`, if a ticket key exists.
+
+   Merge results (dedupe by `id`): a hit from query 1 or 2 is `matchedBy:
+   "diff-seed"` (`matchedSeed` = whichever keyword/seed matched); a hit ONLY
+   from query 3 is `matchedBy: "ticket-link"`. Rank `diff-seed` above
+   `ticket-link`, cap at 5. For each kept candidate, build its Testomat URL as
+   `<baseUrl>/projects/<projectId>/test/<id>-<slug(title)>` (`baseUrl`/
+   `projectId` from `mcp__testomatio__system_ping`; `slug` = lowercase, spaces
+   → hyphens, strip non-alphanumeric) — write `manual-test-candidates.json`
+   in the exact shape CONTRACTS.md documents: `{status: "RAN", queriedBy:
+   {seeds: [...], ticket: "<key or null>"}, candidates: [{id, title, suite,
+   matchedBy, matchedSeed, url}]}`. No MCP → the same file with `status:
+   "SKIPPED — Testomatio MCP not configured"`; read-only-token 403 → `status:
+   "DEGRADED — Testomatio token is read-only"` — never the ad hoc `status:
+   "OK"`/`seedQuery`/`ticketQuery` shape a past run used by mistake; that
+   breaks `risk-score.ps1`'s `manualTestVolume` signal, which gates strictly
+   on `status == "RAN"`. Stream one line ("Manual testing: 2 candidates — see
+   report"). Overlaps step 3; a failure here degrades this lane only.
 3. **Unit** (skipped under `--quick`) — issue
    `scripts/run-tests.ps1 -Manifest <path>` (chained into
    `scripts/diff-coverage.ps1`) in the SAME tool-call batch as step 4's agent
@@ -538,14 +574,29 @@ not reporting) — capture both, don't conflate them.
    two scripts have a strict sequential data dependency (risk-score reads
    merge's output file) with zero judgment in between, so there is no reason
    to spend two round-trips on it. Stream survivors as they land.
-6. **Risk score** — `scripts/risk-score.ps1` (the contract signal already exists
-   from step 2 on committed-spec/ocelot repos — no recompute needed later). Same
-   invocation also writes `gap-lattice.json` (GH issue #26): the script already
-   loads `diff-coverage.json`/`mutation-report.json`/`mutants.json` for its own
-   signals, and only ever runs here — after step 5's mutation merge — so this is
-   what makes the evidence file's gap lattice mechanical and timing-proof,
-   replacing qa-analyst's own (unreliable, race-prone) `gapLattice` as its
-   source. No separate script, no extra step.
+6. **Risk score — runs in EVERY mode, including `--quick`.** `scripts/risk-score.ps1
+   -Manifest <path>` (the contract signal already exists from step 2 on
+   committed-spec/ocelot repos — no recompute needed later). It reads
+   `impact-index.json`/`manual-test-candidates.json` too (`crossRepoImpact`/
+   `uiAutomationExposure`/`manualTestVolume` signals) alongside the
+   execution-dependent ones — every signal individually renormalizes when its
+   own artifact is missing, so the script never refuses to run just because
+   some inputs don't exist yet. **Under `--quick`**: run it right after step 2c
+   (impact + manual-test), chained with nothing else since there's no mutation
+   merge to wait on — `diff-coverage.json`/`test-results.json`/
+   `mutation-report.json` won't exist, so `branchDiffCoverage`/
+   `changedMethodComplexity`/`changedExecutableLines`/
+   `survivingBusinessRuleMutants` are honestly unavailable, but
+   `testToSourceBalance`/`churn90d` (pure diff/git) and `crossRepoImpact`/
+   `uiAutomationExposure`/`manualTestVolume` (from step 2b/2c, which always ran)
+   are commonly still available — a quick review gets a real band with
+   `confidence: "low"`, never a blanket "couldn't check". **Under a full run**:
+   same invocation also writes `gap-lattice.json` (GH issue #26): the script
+   already loads `diff-coverage.json`/`mutation-report.json`/`mutants.json` for
+   its own signals, and only ever runs here — after step 5's mutation merge —
+   so this is what makes the evidence file's gap lattice mechanical and
+   timing-proof, replacing qa-analyst's own (unreliable, race-prone)
+   `gapLattice` as its source. No separate script, no extra step.
 7. **Execution** (consent already answered in step 2, per
    `toggles.executionConsent` literally — never a judgment call to bypass;
    skipped under `--quick`): E2E additionally needs the dev-stack health check to

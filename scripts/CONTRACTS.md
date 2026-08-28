@@ -734,12 +734,41 @@ the execution consent.
 {
   "score": 62, "band": "Elevated",   // 0-20 Low | 21-45 Moderate | 46-70 Elevated | 71-100 High
   "hardOverride": null,               // "build-failed" | "affected-test-failed"
-  "signals": [{ "name": "branchDiffCoverage", "value": 0.41, "weight": 0.28, "contribution": 17, "available": true }],
+  "signals": [{ "name": "branchDiffCoverage", "value": 0.41, "weight": 0.2296, "contribution": 14, "available": true }],
   "renormalized": false, "missingSignals": [],
   "confidence": "moderate",           // high | moderate | low — from missing signals + coverage of evidence
   "topTests": [{ "fqn": "…", "reason": "unique cover of 6 changed lines", "runCommand": "…" }]
 }
 ```
+The 10 documented signals and weights (sum to exactly 1.0000):
+
+| Signal | Weight | Source | Needs execution? |
+|---|---|---|---|
+| `branchDiffCoverage` | 0.2296 | `diff-coverage.json` | yes |
+| `survivingBusinessRuleMutants` | 0.164 | `mutation-report.json` | yes |
+| `changedMethodComplexity` | 0.1148 | `diff-coverage.json` gaps | yes |
+| `changedExecutableLines` | 0.0984 | `diff-coverage.json` | yes |
+| `contractBreaking` | 0.0984 | `contract-report.json` | no (committed-spec/ocelot paths run in Phase 1) |
+| `testToSourceBalance` | 0.0738 | `diff-set.json` paths | no |
+| `churn90d` | 0.041 | `git log` on changed paths | no |
+| `crossRepoImpact` | 0.06 | `impact-index.json` matches, `indexOnly:false`, distinct repos ≠ the reviewed repo, clamp(/3) | no |
+| `uiAutomationExposure` | 0.06 | `impact-index.json` matches, `indexOnly:true`, distinct files, clamp(/5) | no |
+| `manualTestVolume` | 0.06 | `manual-test-candidates.json` candidate count (only when `status == "RAN"`), clamp(/5) | no |
+
+`crossRepoImpact`/`uiAutomationExposure`/`manualTestVolume` are blast-radius
+signals blended into the SAME score as the correctness signals above — a
+change that reaches further has more surface for a mistake to cause damage,
+which is a genuine merge-risk dimension on its own. All three read Phase
+1b/1c artifacts, which run in every mode including `--quick`, so a quick
+review's score commonly rests on these three plus `testToSourceBalance`/
+`churn90d` (and `contractBreaking` when the gate opened on a committed-spec
+path) — five non-execution signals, never a blanket "couldn't check".
+Availability is gated on "did the phase actually run" (the artifact exists,
+and for `manualTestVolume` specifically `status == "RAN"` — its own honest
+`SKIPPED …`/`DEGRADED …` strings must never be read as "0 candidates"), never
+on "0 matches/candidates" — a genuine zero is available evidence (`S: 0`),
+same pattern `survivingBusinessRuleMutants` already uses.
+
 When signals are missing, `signals` also carries a synthetic `unknownEvidence` row
 (`available: true`, `value` = the fraction of total documented weight that's
 missing, `S: 0.35`) — see "Sparse-evidence dampening" below. Its `contribution`
@@ -961,6 +990,10 @@ endpoint path, `Table`/`Table.Column`, type/method name, or file path).
     { "kind": "table", "value": "Entries.PostingDate", "from": "migrations/20260812_AddPostingDate.cs:9" }
   ],
   "droppedSeeds": [{ "value": "Name", "reason": "low-signal — too generic to match on" }],
+  "domainKeywords": {
+    "page": ["registrations", "expenses"],
+    "value": ["approved", "processed"]
+  },
   "matches": [
     { "repoSlug": "e-conomic/client", "indexOnly": false,
       "file": "src/api/entries.ts", "line": 12,
@@ -978,6 +1011,18 @@ endpoint path, `Table`/`Table.Column`, type/method name, or file path).
   "skipped": [{ "repoSlug": "e-conomic/ui-automation", "reason": "path not found on this machine" }]
 }
 ```
+`domainKeywords` (branch mode only, empty arrays in target mode): a SEPARATE,
+business-language sibling to `seeds` — `page` comes from the changed files' own
+directory segments (a stoplist drops generic structural dirs: `src`, `pages`,
+`components`, …), `value` from string literals passed to an i18n/translation
+call (`` t`...` `` / `t('...')`) on a changed line, interpolations stripped.
+Deliberately NOT fed into `matches`/cross-repo scanning (a page/value keyword
+is a plain English word — scanning code text on it would be pure noise); its
+only consumer is the manual-test-candidate query (CONTRACTS.md
+`manual-test-candidates.json`), which ANDs the `page` OR-group against the
+`value` OR-group to stay precise (verified live: `page`-only matched an entire
+feature area, `page`+`value` narrowed to the 2 genuinely relevant tests).
+
 Seed kinds: `endpoint | symbol | dto | table | column | file`. In branch mode the
 script extracts them from the diff: routes from `[Route]`/`[Http*]`/`Map*(`/Ocelot
 configs, tables/columns from changed migration files, type/method names from changed
@@ -1051,10 +1096,16 @@ writes whenever either toggle needs them (see that section). Queries Testomat fo
   ]
 }
 ```
-`matchedBy`: `diff-seed` (the manual test's own text matched a seed extracted from
-the diff — the stronger signal) or `ticket-link` (matched only via `jira ==
-'<ticketKey>'` — filed under the same ticket, weaker evidence since it doesn't
-confirm the test text actually relates to the changed code). Rank `diff-seed`
+`queriedBy.seeds` lists whatever the query actually used to find `diff-seed`
+matches — code-symbol seed values (`impact-index.json`'s `seeds`) AND/OR
+domain keywords (`impact-index.json`'s `domainKeywords`, page-group ANDed
+against value-group when both are non-empty) — not code seeds alone; a plain
+business-language manual test title has no code symbol in it at all.
+`matchedBy`: `diff-seed` (the manual test's own text matched a seed OR a
+domain-keyword combination extracted from the diff — the stronger signal) or
+`ticket-link` (matched only via `jira == '<ticketKey>'` — filed under the same
+ticket, weaker evidence since it doesn't confirm the test text actually
+relates to the changed code). Rank `diff-seed`
 candidates above `ticket-link` ones. Consumers present these ONLY as *candidates
 (keyword/ticket match)* — never "this must be tested", never "affected". Cap at 5
 shown in the report, `+N more` pointing at this file. A missing file on a run where

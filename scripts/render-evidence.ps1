@@ -602,8 +602,10 @@ function Build-ManualTesting {
             $cid = [string](Get-Prop $c 'id' '')
             $title = [string](Get-Prop $c 'title' '')
             $matchedBy = [string](Get-Prop $c 'matchedBy' '')
+            $url = [string](Get-Prop $c 'url' '')
+            $titleRendered = if ($url) { "[$title]($url)" } else { $title }
             $why = if ($analystFraming.ContainsKey($cid)) { $analystFraming[$cid] } else { '' }
-            $lines.Add("- **$title** (``$matchedBy``, candidate — keyword/ticket match)$(if ($why) { " — $why" })")
+            $lines.Add("- **$titleRendered** (``$matchedBy``, candidate — keyword/ticket match)$(if ($why) { " — $why" })")
         }
         if (@($ordered).Count -gt 5) { $lines.Add("- +$(@($ordered).Count - 5) more — see manual-test-candidates.json") }
         if (@($ordered).Count -eq 0) { $lines.Add('0 candidates found.') }

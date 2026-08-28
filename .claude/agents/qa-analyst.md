@@ -252,14 +252,42 @@ Rank `diff-seed` matches (the manual test's own text mentions the changed code)
 above `ticket-link` matches (filed under the same ticket/component — weaker
 evidence, since it doesn't confirm the test text actually relates to what changed).
 Cap at 5, note how many more exist (`status`/`candidates` length in the artifact).
-Frame each as *why it's worth a human running it now* — the real scenario, not just
-the test title: "the linked manual test 'Disconnect the employee after connecting
-an existing user' exercises the same registration-user flow this diff touches;
-nothing in the automated suite covers it" — not "candidate: de8c0276." Always
-**candidates (keyword/ticket match)** — never assert a manual test is affected or
-that running it is mandatory; that call is the developer's. `status` says
-SKIPPED/DEGRADED plainly when the lane couldn't run — that's a gap in evidence, not
-a finding, and you say so rather than omitting the section.
+Each entry's JSON key for this framing MUST be named `why` exactly (not `note`,
+not `reason`, not `description`) — `render-report.ps1` and `render-evidence.ps1`
+both read the literal key `why`; any other name silently falls back to the bare
+title with no framing at all.
+
+**Read the candidate's own `description`/steps** (from `manual-test-candidates.json`,
+inlined in the pack) before writing `why` — never frame from the title or the
+match mechanics alone. Write `why` as the real, concrete PRODUCT scenario the test
+validates, in plain user/business language, exactly like a `finding.plain` or
+`plainQuestion` (CLAUDE.md's plain-language rule applies here too): "Validates
+that after a payroll with imported registrations is processed, the history view
+shows the item labeled as processed with the processing date — the exact label
+this fix changes." Never write from the ANALYST's-eye view of the match itself —
+banned phrases: "this manual test," "the linked manual test," "diff-seed match,"
+"same suite," "candidate above," "weaker relevance," or any other sentence whose
+subject is the search/matching process rather than the product scenario. A
+developer reading `why` should learn what the scenario DOES, not how agentQ found
+it — `render-report.ps1`/`render-evidence.ps1` already attach the `matchedBy`
+label and the Testomat link mechanically, so `why` never needs to mention either.
+
+**Judge genuine relevance, don't just relay the keyword hit.** A page/value
+keyword match can surface a test that shares vocabulary but tests a genuinely
+different scenario (e.g. an import-toggle test matching on "registrations" +
+"approved" when the diff is about a tooltip *label*, not the toggle). If a
+candidate's own description doesn't actually exercise the behavior this diff
+changed, either drop it from `manualTesting[]` entirely (still counts toward
+`+N more` — cap/count logic is mechanical and unaffected) or, if it's borderline,
+say so honestly in product terms ("This scenario is about who can start a payroll
+import, not about how an already-processed item's label reads — likely not
+needed for this specific fix, include only if in doubt."). Never keep a
+tangential match in the surfaced list dressed up as more relevant than it is.
+
+Always **candidates (keyword/ticket match)** — never assert a manual test is
+affected or that running it is mandatory; that call is the developer's. `status`
+says SKIPPED/DEGRADED plainly when the lane couldn't run — that's a gap in
+evidence, not a finding, and you say so rather than omitting the section.
 
 ### `summaryCounts` — the small numbers `render-report.ps1` needs without
 re-reading every raw artifact itself: `acMet`/`acTotal` (count `acAlignment`
