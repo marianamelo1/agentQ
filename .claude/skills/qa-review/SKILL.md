@@ -126,13 +126,15 @@ progress is the only liveness signal this procedure trusts):
    (`sleep <ceilingSeconds>` via Bash, or `Start-Sleep -Seconds <n>` via
    PowerShell — either is cross-platform; never a `cmd.exe`-only construct) with
    `run_in_background: true`, in the **same tool-call batch** as the dispatch.
-   In the SAME batch, also arm the watchdog state file (this is what the `Stop`
-   hook enforces, per GH issue #36 above): `pwsh scripts/watchdog-hook.ps1 -Arm
-   -Label <label> -Agent <agent-type> -CeilingSeconds <ceiling>` (drop the
-   `pwsh` prefix in a native PowerShell session). Use the SAME `<label>` at
-   every subsequent `-Extend`/`-Clear`/re-`-Arm` for this dispatch — it's the
-   only key the hooks and this procedure use to refer to it. Whichever
-   completes first re-invokes you.
+   **Capture the timer's own task id from that tool call's result** — you need
+   it later to stop the timer (GH issue #52 below). In the SAME batch, also arm
+   the watchdog state file (this is what the `Stop` hook enforces, per GH issue
+   #36 above): `pwsh scripts/watchdog-hook.ps1 -Arm -Label <label> -Agent
+   <agent-type> -CeilingSeconds <ceiling> -TimerTaskId <the captured timer task
+   id>` (drop the `pwsh` prefix in a native PowerShell session). Use the SAME
+   `<label>` at every subsequent `-Extend`/`-Clear`/re-`-Arm` for this dispatch
+   — it's the only key the hooks and this procedure use to refer to it.
+   Whichever completes first re-invokes you.
 2. **Agent's own completion notification arrives first** → sanity-check it
    before accepting it as done: does its result actually match what it was
    asked for (the expected workspace artifact exists / the response isn't a
@@ -143,23 +145,34 @@ progress is the only liveness signal this procedure trusts):
    the notification" check does not catch (the `SubagentStop` hook now also
    screens for this pattern independently, before this check even runs). If
    the result looks genuinely done → clear its entry (`-Clear -Label <label>`)
-   and proceed normally; the timer later firing is a no-op. If it looks
+   **and, in the SAME turn, `TaskStop` the paired timer** (GH issue #52: the
+   timer keeps running after `-Clear` otherwise, and fires its own useless
+   "background command completed" notification minutes later). Don't rely on
+   having remembered the timer's task id from step 1 across the wait — `-Clear`
+   itself echoes it back on stdout as `ACTION REQUIRED: ... call TaskStop
+   '<id>' now` whenever the entry was armed with one; treat that line as a
+   literal instruction for this same turn, not just informational. If it looks
    incomplete → treat it exactly like a stalled dispatch from step 3b onward
    (`SendMessage` a nudge to resume it — confirmed live: a nudged agent
    correctly picked back up and finished with the right answer once told to
    actually wait for its own background work). Leave the entry armed while
    incomplete — clearing it early would blind the `Stop` hook to a dispatch
-   that isn't actually done.
+   that isn't actually done (and would prematurely tell you to stop a timer
+   still doing its job).
 3. **Timer fires first** → the agent is running long or has stalled:
    a. Stream one status line immediately ("`<agent>` is past its expected time
       (ceiling `<n>`s) — checking on it"). Never go dark.
    b. **Check the dispatch's checkpoint artifact FIRST** (per-agent, from the
       table above — existence + last-write time): written or updated since this
       dispatch started → the agent is demonstrably progressing; extend ONCE by
-      ~60s (a new background timer, AND `pwsh scripts/watchdog-hook.ps1 -Extend
-      -Label <label> -AdditionalSeconds 60` so the `Stop` hook's deadline moves
-      with it; at most one extension per dispatch, ever) and skip the nudge.
-      On-disk progress is the ONLY liveness signal this
+      ~60s (a new background timer — the original one already fired, that's
+      why you're here; capture ITS task id too — AND `pwsh
+      scripts/watchdog-hook.ps1 -Extend -Label <label> -AdditionalSeconds 60
+      -TimerTaskId <the new timer's task id>` so the `Stop` hook's deadline
+      moves with it and the state file's paired-timer id stays current for
+      whichever `-Clear` eventually fires per step 2 above; at most one
+      extension per dispatch, ever) and skip the nudge. On-disk progress is
+      the ONLY liveness signal this
       procedure trusts — verified live (GH issue #32, reproduced 2-for-2): a
       nudged `qa-mutation-author` replied immediately and coherently
       ("Injecting now — four switches") having written zero bytes, and the
@@ -177,9 +190,17 @@ progress is the only liveness signal this procedure trusts):
       only the artifact re-check decides, never the reply.)
    d. **Salvage before deciding on a retry** — a checkpoint left by the dead
       dispatch changes what a retry even is. A **retry** (inject-only or full
-      fresh) re-`-Arm`s the SAME label with a fresh ceiling (upsert — no
-      separate clear needed first); **giving up** clears it
-      (`-Clear -Label <label>`) since there's nothing left to watch:
+      fresh) is a fresh dispatch cycle exactly like step 1 — start its own new
+      paired background timer, capture ITS task id, and re-`-Arm` the SAME
+      label with a fresh ceiling AND that new `-TimerTaskId` (upsert — no
+      separate clear needed first; this overwrites the old, already-fired
+      timer id, same as step 3b's `-Extend`); **giving up** clears it
+      (`-Clear -Label <label>`) since there's nothing left to watch — the
+      original timer for THIS dispatch already fired (that's why you're in
+      step 3 at all), so there's normally nothing live to stop here, but
+      follow the same rule as step 2 regardless: if `-Clear`'s output still
+      names a live timer task id (e.g. one left over from an extension in
+      (b)), `TaskStop` it in this same turn:
       - `mutants.json` at `status: "designed"` → the design work is safe; the
         retry is a cheap **inject-only** re-dispatch of `qa-mutation-author`
         ("`mutants.json` exists at status designed — read it, inject the
@@ -212,17 +233,22 @@ progress is the only liveness signal this procedure trusts):
 
 **Procedure for a background shell job** (`stryker-run.ps1` in step 5,
 `worktree.ps1 -EnsureBase` in step 7): same paired-timer start (also `-Arm` a
-label for it, same as an agent dispatch — the `Stop` hook doesn't distinguish
-agent dispatches from background shell jobs, it just checks the state file),
-but there's no
+label for it with the paired timer's captured `-TimerTaskId`, same as an agent
+dispatch — the `Stop` hook doesn't distinguish agent dispatches from background
+shell jobs, it just checks the state file), but there's no
 `SendMessage` target — on the timer firing first, stream the status line, then
 check the job's actual state (its own log/output files, or `TaskOutput` if the
 harness exposes it for that background task) rather than nudging: growing
-output → extend once with a timer at half the original ceiling (`-Extend` to
-match); no progress /
+output → extend once with a timer at half the original ceiling (a fresh timer,
+its task id passed via `-Extend ... -TimerTaskId <id>`, same as the agent
+procedure's step 3b); no progress /
 process gone → `DEGRADED` row with real elapsed time, `-Clear` the label, run
 continues without that
-phase's result (e.g., mutation results marked not completed this run).
+phase's result (e.g., mutation results marked not completed this run). Same
+rule as everywhere else in this procedure (GH issue #52): when the job finishes
+on its own before its timer fires, `-Clear` the label AND, in the same turn,
+`TaskStop` whichever timer task id `-Clear`'s own stdout names — never leave
+the paired timer to fire its own now-useless notification later.
 
 ## Run loop
 
