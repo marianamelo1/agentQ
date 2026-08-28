@@ -873,11 +873,12 @@ try {
     $script:coverletInstallProc = $null
     $script:coverletInstallTimedOut = $false
     if ($null -ne $calibCoverage -and -not $calibCoverageStale -and
-        (Get-Prop $calibCoverage 'dotnetCoverageWorks' $null) -eq $false -and
         (Get-Prop $calibCoverage 'coverletConsoleWorks' $null) -ne $false -and
         (-not (Get-Command coverlet -ErrorAction SilentlyContinue))) {
         $needsCoverletFallback = @($profiles) | Where-Object {
-            [string](Get-Prop $_ 'coverageMechanism' 'collector') -eq 'dotnet-coverage'
+            $mech = [string](Get-Prop $_ 'coverageMechanism' 'collector')
+            $mechCapKey = if ($mech -eq 'dotnet-coverage') { 'dotnetCoverageWorks' } else { 'collectorWorks' }
+            (Get-Prop $calibCoverage $mechCapKey $null) -eq $false
         }
         if (@($needsCoverletFallback).Count -gt 0) {
             try {
@@ -1065,24 +1066,28 @@ try {
                 (Get-Prop $calibCoverage $capKey $null) -eq $false) {
                 # dotnet-coverage has a documented gap on some machines (osx-arm64:
                 # its native profiler never attaches, so class data is always empty,
-                # forever -- not just once). Escalate to coverlet.console instead of
-                # a bare skip: it instruments the already-built assemblies via IL
+                # forever -- not just once), and the collector mechanism can be
+                # calibrated broken too (a different profiler-attach gap, or any
+                # other machine-specific cause). Escalate to coverlet.console instead
+                # of a bare skip: it instruments the already-built assemblies via IL
                 # rewrite before the target process runs (verified live: no leftover
                 # instrumented/backup DLLs after it finishes), never a profiler
                 # attach on the child process -- a genuinely different mechanism,
-                # not a retry of the one already proven broken here. Scoped to
-                # dotnet-coverage only (the evidenced gap); needs coverlet.console
-                # itself not already proven broken here, the tool present, and a
-                # TFM to find the build output.
+                # not a retry of the one already proven broken here. Applies to any
+                # mechanism calibrated broken (having already passed the gate above)
+                # -- not just dotnet-coverage; needs coverlet.console itself not
+                # already proven broken here, the tool present, and a TFM to find
+                # the build output.
                 $tfmForFallback = [string](Get-Prop $prof 'tfm' '')
                 $coverletKnownBroken = ((Get-Prop $calibCoverage 'coverletConsoleWorks' $null) -eq $false)
-                if ($mechanism -eq 'dotnet-coverage' -and -not $coverletKnownBroken -and $tfmForFallback -and
+                if ($mechanism -ne 'coverlet-console' -and -not $coverletKnownBroken -and $tfmForFallback -and
                     (Install-CoverletConsoleOnDemand)) {
+                    $fromMechanism = $mechanism
                     $mechanism = 'coverlet-console'
                     $capKey = 'coverletConsoleWorks'
                     $binDirForFallback = Join-Path (Join-Path (Join-Path (Split-Path -Parent $projAbs) 'bin') 'Debug') $tfmForFallback
                     $coverageDegraded = $true
-                    $coverageNote = 'coverage: dotnet-coverage is calibrated broken on this machine (calibration.coverage.dotnetCoverageWorks=false) -- falling back to coverlet.console (IL-rewrite, no profiler attach, no product .csproj change) instead of losing coverage entirely'
+                    $coverageNote = "coverage: $fromMechanism is calibrated broken on this machine (calibration.coverage.$capKey=false) -- falling back to coverlet.console (IL-rewrite, no profiler attach, no product .csproj change) instead of losing coverage entirely"
                 }
                 else {
                     $wantCoverage = $false
@@ -1090,7 +1095,7 @@ try {
                     # Legible even in the worst case (CLAUDE.md: a DEGRADE must
                     # never read as a generic refusal) -- name exactly which
                     # fallback was or wasn't tried and why, not just "skipped".
-                    $whyNoFallback = if ($mechanism -ne 'dotnet-coverage') { 'not applicable to this mechanism' }
+                    $whyNoFallback = if ($mechanism -eq 'coverlet-console') { 'not applicable to this mechanism' }
                                       elseif ($coverletKnownBroken) { 'coverlet.console is ALSO calibrated broken on this machine (calibration.coverage.coverletConsoleWorks=false)' }
                                       elseif (-not $tfmForFallback) { 'adapter-profiles.json has no tfm for this project, so the build output directory cannot be located' }
                                       elseif ([bool]$script:coverletInstallTimedOut) { 'coverlet.console install (dotnet tool update --global coverlet.console) exceeded its 300s anti-hang valve and was killed -- likely a NuGet feed/network stall, not a real failure of the tool itself' }

@@ -178,17 +178,20 @@ There is no local override — the PR pipeline runs these suites on every PR.
 `coverageMechanism` is qa-intake's static per-project choice, but `run-tests.ps1`
 can override it at RUN TIME to a third, undocumented-here value,
 `"coverlet-console"` — never written by qa-intake, never a valid input value,
-purely an execution-time escalation. It fires only when `coverageMechanism` is
-`"dotnet-coverage"` AND `calibration.json`'s `coverage.dotnetCoverageWorks` is
-already `false` on this machine (a documented gap: `dotnet-coverage`'s native
-profiler never attaches on osx-arm64, so every run there would otherwise lose
-coverage forever, not just once) — coverlet.console instruments the already-built
-assemblies via IL rewrite instead of a profiler attach, so it needs no product
-`.csproj` change either. The `coverlet.console` tool itself is installed on
-demand by `run-tests.ps1` at the moment of this escalation — kicked off as a
-non-blocking background process as soon as calibration shows `dotnet-coverage`
-broken, so the install overlaps with the same run's other test-project builds
-instead of adding serial latency — never by `setup-mcp.ps1`, which
+purely an execution-time escalation. It fires whenever the project's OWN
+`coverageMechanism` (`"collector"` or `"dotnet-coverage"`) is already calibrated
+broken on this machine — `calibration.json`'s `coverage.collectorWorks` or
+`coverage.dotnetCoverageWorks` respectively is `false` (a documented gap for
+`dotnet-coverage`: its native profiler never attaches on osx-arm64, so every run
+there would otherwise lose coverage forever, not just once; `collector` can be
+calibrated broken for the same class of machine-specific profiler-attach reason) —
+coverlet.console instruments the already-built assemblies via IL rewrite instead
+of a profiler attach, so it needs no product `.csproj` change either, regardless
+of which mechanism it's replacing. The `coverlet.console` tool itself is installed
+on demand by `run-tests.ps1` at the moment of this escalation — kicked off as a
+non-blocking background process as soon as calibration shows the project's own
+mechanism broken, so the install overlaps with the same run's other test-project
+builds instead of adding serial latency — never by `setup-mcp.ps1`, which
 deliberately does not pre-install it (most machines never reach this code
 path). See `calibration.json` below for the
 `coverletConsoleWorks` capability key this escalation self-records, and
@@ -418,15 +421,15 @@ honestly and is retried plainly next run, never persisted as `false`.
 
 `coverletConsoleWorks` is different from the other two: it is never a project's
 OWN declared mechanism (`coverageMechanism` has no `"coverlet-console"` value —
-see the note above), only a fallback `run-tests.ps1` reaches for once
-`dotnetCoverageWorks` is already `false` here. So it starts absent (not `false`)
-on a machine that has never needed the fallback, gets its first real value the
-first time `dotnet-coverage` is caught broken, and from then on gates the SAME
-way the other two do: `true` keeps the fallback in play, `false` (it was tried
-and also produced no `<class>` data) stops it being retried until
-`-ForceCoverage`. When BOTH `dotnetCoverageWorks` and `coverletConsoleWorks` are
-`false`, coverage is skipped outright and `coverageNote` says so explicitly —
-never a bare "skipped" with no reason.
+see the note above), only a fallback `run-tests.ps1` reaches for once the
+project's own mechanism (`collectorWorks` or `dotnetCoverageWorks`) is already
+`false` here. So it starts absent (not `false`) on a machine that has never
+needed the fallback, gets its first real value the first time either mechanism
+is caught broken, and from then on gates the SAME way the other two do: `true`
+keeps the fallback in play, `false` (it was tried and also produced no `<class>`
+data) stops it being retried until `-ForceCoverage`. When BOTH the project's own
+mechanism and `coverletConsoleWorks` are `false`, coverage is skipped outright
+and `coverageNote` says so explicitly — never a bare "skipped" with no reason.
 
 Note: `coverletConsoleWorks` tracks whether the mechanism, once run, PRODUCED
 class data — it says nothing about whether the `coverlet.console` binary is
