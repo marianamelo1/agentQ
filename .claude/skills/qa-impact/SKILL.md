@@ -31,9 +31,24 @@ Same four optional slots as `/qa-review` (`--branch` / `--repo` / `--worktree` /
 
 ## Run loop
 
-1. **Preflight** — read `.claude/qa-agent-config.jsonc` (missing → point at the
+**Real-timestamp run log:** capture `$runStartedAt` (ISO8601 UTC — `Get-Date
+-Format o` / `date -u +%Y-%m-%dT%H:%M:%SZ`) as the literal first action of
+step 1, before reading the config — same convention as `/qa-review` (see that
+skill's SKILL.md). Pass it to `-EnsureWorkspace -RunStartedAt $runStartedAt`.
+This skill has no evidence file, so there's no per-phase ledger to maintain —
+just the two bookends, written to a small `run-timeline.json`
+(`{runStartedAt, runEndedAt, totalSeconds}`, same field names as
+`time-ledger.json`'s bookends per CONTRACTS.md — no `phases[]`, this skill is
+too short-lived to need a breakdown) at step 6, plus the same slow-run check
+`/qa-review` runs (`scripts/file-perf-issue.ps1 -RunKind qa-impact`) —
+included mainly as a safety net for `--target` runs against a very large repo
+set, since a normal `/qa-impact` run is seconds, not minutes.
+
+1. **Preflight** — capture `$runStartedAt` right now, per the note above. Read
+   `.claude/qa-agent-config.jsonc` (missing → point at the
    example; stop). Resolve repo/worktree exactly as `/qa-review` step 1
-   (`worktree.ps1 -DetectRepo …`), then `-EnsureWorkspace` + `run-manifest.json`.
+   (`worktree.ps1 -DetectRepo …`), then `-EnsureWorkspace -RunStartedAt
+   $runStartedAt` + `run-manifest.json`.
    No heal, no setup offers — nothing here mutates anything.
 2. **Index** — `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>
    [-Targets "<term1>,<term2>"]` → `impact-index.json`. It extracts seeds
@@ -66,6 +81,19 @@ Same four optional slots as `/qa-review` (`--branch` / `--repo` / `--worktree` /
    same content to `reports/impact-<repoShort>-<ticket-or-branch>-<YYYY-MM-DD-HHmm>.md`.
    No agent needed for a normal run; delegate to `qa-analyst` only when the
    developer asks for interpretation beyond the map ("which of these is riskiest?").
+   Capture `$runEndedAt` right before this map is shown; write
+   `<workspaceDir>/run-timeline.json` as `{"runStartedAt": $runStartedAt,
+   "runEndedAt": $runEndedAt, "totalSeconds": (runEndedAt - runStartedAt).TotalSeconds}`.
+   Then call
+   `scripts/file-perf-issue.ps1 -TimeLedgerPath <workspaceDir>/run-timeline.json
+   -RunManifestPath <path> -OutPath <workspaceDir>/perf-issue.json -RunKind
+   qa-impact` — same script `/qa-review` uses, on every run; it owns the
+   threshold decision (its `-ThresholdMinutes`/`-TargetRepo` parameter
+   defaults — never pass values), so it's safe to call every time. If it comes
+   back
+   `filed:true`, add one closing chat line naming the issue link; never block
+   or delay the impact map on its result, and if the script itself fails or
+   produces nothing, just continue — telemetry never stops a run.
 
 ## Impact map format (concise — hard caps)
 

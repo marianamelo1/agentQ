@@ -56,14 +56,25 @@ $tools = @(
     @{ Command = 'node';   Optional = $false },
     @{ Command = 'npm';    Optional = $false },
     @{ Command = 'dotnet'; Optional = $false },
-    @{ Command = 'docker'; Optional = $true }
+    @{ Command = 'docker'; Optional = $true; Note = 'consented Testcontainers paths only' },
+    @{ Command = 'gh';     Optional = $true; Note = 'scripts using it degrade honestly without it' }
 )
 foreach ($t in $tools) {
     if (Get-Command $t.Command -ErrorAction SilentlyContinue) {
         Write-Host ("[ok] {0}" -f $t.Command) -ForegroundColor Green
     } else {
-        $suffix = if ($t.Optional) { ' (optional - consented Testcontainers paths only)' } else { " - run $SetupCmd" }
+        $suffix = if ($t.Optional) { " (optional - $($t.Note))" } else { " - run $SetupCmd" }
         Write-Host ("[missing] {0}{1}" -f $t.Command, $suffix) -ForegroundColor $(if ($t.Optional) { 'Yellow' } else { 'Red' })
+    }
+}
+
+# gh auth: presence alone isn't enough - writes need a login.
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    & gh auth status *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[ok] gh authenticated" -ForegroundColor Green
+    } else {
+        Write-Host "[warn] gh present but not authenticated - run: gh auth login" -ForegroundColor Yellow
     }
 }
 

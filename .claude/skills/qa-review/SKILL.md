@@ -226,7 +226,27 @@ phase's result (e.g., mutation results marked not completed this run).
 
 ## Run loop
 
-1. **Preflight** — read `.claude/qa-agent-config.jsonc` (missing → tell the user to
+**Real-timestamp run log (applies to the whole run loop, every step below):**
+capture `$runStartedAt` (ISO8601 UTC — `Get-Date -Format o` / `date -u
++%Y-%m-%dT%H:%M:%SZ`) as the literal FIRST action of step 1, before even
+reading the config — this is the "developer's first message" anchor for the
+evidence file's Run timeline (CONTRACTS.md `run-manifest.json`/`time-ledger.json`).
+Pass it to `-EnsureWorkspace -RunStartedAt $runStartedAt` in step 1 so it lands
+in `run-manifest.json`. From then on, every `time-ledger.json` phase row you
+append (per the existing per-phase append pattern used throughout this run
+loop) SHOULD also carry `startedAt`/`endedAt` (same ISO8601 format) bracketing
+that phase's own work — additive to the `seconds` field every consumer already
+reads, never a replacement. Around each consent question (the combined
+consent below, and any later one), append a `"consent-wait"` row (`actor:
+"developer (chat reply)"`) spanning from asking to the developer's answer —
+this is what lets the evidence file separate human answer-latency from
+machine time, so a slow run caused by the developer thinking is never misread
+as agentQ being slow. This is a DIFFERENT, earlier timestamp than the
+watchdog's own `runStart` below (which anchors the 10-minute run-budget check,
+not reporting) — capture both, don't conflate them.
+
+1. **Preflight** — capture `$runStartedAt` right now, per the note above. Read
+   `.claude/qa-agent-config.jsonc` (missing → tell the user to
    copy the example; stop). Run `pwsh scripts/watchdog-hook.ps1 -ClearAll` here
    too (harmless if already empty) — a stale armed entry from an earlier task in
    this same session must never carry into a fresh run. Resolve the repo/worktree:
@@ -250,7 +270,8 @@ phase's result (e.g., mutation results marked not completed this run).
    there is no judgment gate between them and no reason to spend three
    round-trips: `scripts/worktree.ps1 -Heal -RepoPath <path>` then
    `-EnsureWorkspace -RepoSlug <candidate's repoSlug> -Branch <candidate's branch>
-   -RepoPath <candidate's repoPath> [-TicketKey <KEY, if known>]` — all three of
+   -RepoPath <candidate's repoPath> [-TicketKey <KEY, if known>]
+   -RunStartedAt <$runStartedAt captured above>` — all three of
    `-RepoSlug`/`-Branch`/`-RepoPath` are required (the script throws otherwise);
    take them verbatim from the resolved candidate above, not the registered
    config path, since a `git worktree add` sibling's `repoPath` differs from it —
@@ -288,14 +309,19 @@ phase's result (e.g., mutation results marked not completed this run).
    **💬 Combined consent (immediately after intake, one message)**: capture the
    run-start timestamp now (`date +%s` / `Get-Date`) — this anchors the
    10-minute run-wide budget the watchdog procedure above checks for every
-   dispatch from here on. Ask BOTH
+   dispatch from here on (distinct from `$runStartedAt` above — see the note
+   at the top of this run loop). Also note the wall-clock right before sending
+   this message; when the developer answers, append a `"consent-wait"` row to
+   `time-ledger.json` (`startedAt`/`endedAt` bracketing the ask-to-answer span,
+   `outcome: "ANSWERED"`) — per the real-timestamp note at the top of this run
+   loop. Ask BOTH
    gates now per their toggles — mutation (scope, calibrated mutant/time
    estimate; your nothing-worth-mutating auto-skip judgment still applies first)
    and execution (disclose intake's outbound destinations verbatim). Remember
    the answers; apply them when steps 5/7 arrive. WHY: the developer's answer
    latency then overlaps steps 2b–4's machine work instead of serializing
    between phases. `--quick` → skip the question entirely, record both gates
-   `SKIPPED — quick mode`.
+   `SKIPPED — quick mode` (no `consent-wait` row either — nothing was asked).
 2b. **Impact (gated by `toggles.skipQaImpact`, never blocking)** —
    `scripts/impact-index.ps1 -Manifest <path> -ConfigPath <cfg>` runs whenever
    `skipQaImpact` is `false` OR step 2c's `skipManualTestAnalysis` is `false` (the
@@ -527,19 +553,50 @@ phase's result (e.g., mutation results marked not completed this run).
       report AND `report-selection.json` (mechanical: top ≤3 findings/questions
       in the analyst's own priority order; verdict = 🔴 iff a failed test, a
       NOT MET AC, a breaking contract change, or a risk hard-override, else 🟢).
-   2. Append `{ name: "report", actor: "scripts/render-report.ps1", seconds:
-      <measured, ~1-2s>, outcome: "RAN" }` to `time-ledger.json` + update
-      `totalSeconds`.
-   3. `scripts/render-evidence.ps1 -Manifest <path> -ReportPath <the same
+   2. Capture `$runEndedAt` (ISO8601 UTC) right now — this is "the moment the
+      orchestrator is about to answer with the report link", the real-timestamp
+      note's other bookend. Append `{ name: "report", actor:
+      "scripts/render-report.ps1", seconds: <measured, ~1-2s>, startedAt:
+      <before render-report.ps1 ran>, endedAt: $runEndedAt, outcome: "RAN" }`
+      to `time-ledger.json`, then set its `runStartedAt` (copy from
+      `run-manifest.json`, written in step 1) and `runEndedAt` ($runEndedAt
+      just captured), and recompute `totalSeconds` as
+      `(runEndedAt - runStartedAt).TotalSeconds` — the literal real elapsed
+      time since the developer's first message, not a manual estimate
+      (CONTRACTS.md `time-ledger.json`). `--quick` runs skip almost nothing
+      here — the timestamps still matter for a quick run's own honesty.
+   3. **Slow-run check (every run — the maintainer's runtime telemetry)**:
+      `scripts/file-perf-issue.ps1 -TimeLedgerPath
+      <workspaceDir>/time-ledger.json -RunManifestPath <path>
+      -OutPath <workspaceDir>/perf-issue.json -RunKind qa-review`. The script
+      owns the threshold decision itself (its `-ThresholdMinutes` parameter
+      default — never pass a value; the script is the single source of truth.
+      Under it → writes
+      `perf-issue.json` with `overThreshold:false` and does nothing else) —
+      always safe to call, and the target repo (agentQ's own, its `-TargetRepo`
+      default) lives there too. Parse its one stdout JSON line;
+      never block or delay the report on its result (it runs AFTER the report
+      files already exist), and if the script itself fails or produces nothing,
+      just continue — telemetry never stops a run. This must run BEFORE step 4
+      below so `render-evidence.ps1` can pick up `perf-issue.json`.
+   4. `scripts/render-evidence.ps1 -Manifest <path> -ReportPath <the same
       path>` — the `-evidence.md` companion, from the workspace artifacts +
-      `analyst-brief.json` + `report-selection.json`.
-   4. Re-save BOTH files as UTF-8 with BOM (PowerShell
+      `analyst-brief.json` + `report-selection.json` + the Run timeline built
+      from `time-ledger.json`/`perf-issue.json` above.
+   5. Re-save BOTH files as UTF-8 with BOM (PowerShell
       `[IO.File]::WriteAllText` with `UTF8Encoding($true)`).
    No agent dispatch, no watchdog, nothing to time but the chain itself.
    **Do NOT restate the verdict or findings in
    chat** — the closing message is a clickable link to the main report file
    and nothing of its content (the report is the single source of the
-   verdict; a chat copy drifts). Then ask which generated tests to keep; on
+   verdict; a chat copy drifts). The one exception this step 8 adds: if
+   `perf-issue.json` came back `filed:true`, add ONE line — "⚠️ this run took
+   <duration>, over the <perf-issue.json's thresholdSeconds, as minutes>
+   target — filed <issueUrl>."; if it came back
+   `overThreshold:true, filed:false`, add ONE line naming the honest reason
+   (e.g. "gh CLI not authenticated on this machine") instead — never silent
+   either way, and never more than this one line. Then ask which generated
+   tests to keep; on
    explicit yes apply them to the product repo as a reviewed diff (placement
    per adapter profile; the canonical file content lives in
    `<workspaceDir>/generated/`).

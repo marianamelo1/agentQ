@@ -209,6 +209,7 @@ $strykerSummary   = Read-JsonOrNull (Join-Path (Join-Path $workspaceDir 'stryker
 $contractReport   = Read-JsonOrNull (Join-Path $workspaceDir 'contract-report.json')
 $riskScore        = Read-JsonOrNull (Join-Path $workspaceDir 'risk-score.json')
 $timeLedger       = Read-JsonOrNull (Join-Path $workspaceDir 'time-ledger.json')
+$perfIssue        = Read-JsonOrNull (Join-Path $workspaceDir 'perf-issue.json')
 $impactIndex      = Read-JsonOrNull (Join-Path $workspaceDir 'impact-index.json')
 $testomatCand     = Read-JsonOrNull (Join-Path $workspaceDir 'testomat-candidates.json')
 $manualTestCand   = Read-JsonOrNull (Join-Path $workspaceDir 'manual-test-candidates.json')
@@ -241,9 +242,15 @@ if (Test-Path -LiteralPath $scenariosDir) {
 # Section builders
 # -----------------------------------------------------------------------------
 
-function Build-RunSummary {
+function Build-RunTimeline {
+    # Real wall-clock, first message -> final report, per phase - the run's
+    # only phase/timing table (Phase/Actor/Started/Ended/Seconds/Outcome).
+    # Also carries the machine-vs-human-wait split and, when this run
+    # exceeded the slow-run threshold (file-perf-issue.ps1's
+    # -ThresholdMinutes default), the auto-filed GH issue link
+    # (CONTRACTS.md perf-issue.json / scripts/file-perf-issue.ps1).
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add('## Run summary')
+    $lines.Add('## Run timeline')
     $lines.Add('')
     if ($null -eq $timeLedger) {
         $lines.Add('_No time-ledger.json this run - phase timings unavailable._')
@@ -253,18 +260,59 @@ function Build-RunSummary {
     $agentsText = if (@($agents).Count -gt 0) { ($agents -join ' · ') } else { '— none (all cached / skipped) —' }
     $lines.Add("**Agents called:** $agentsText")
     $lines.Add('')
-    $lines.Add('| Phase | Actor | Seconds | Outcome |')
-    $lines.Add('|---|---|---|---|')
+    $rStart = [string](Get-Prop $timeLedger 'runStartedAt' '')
+    $rEnd   = [string](Get-Prop $timeLedger 'runEndedAt' '')
+    if ([string]::IsNullOrWhiteSpace($rStart) -or [string]::IsNullOrWhiteSpace($rEnd)) {
+        $lines.Add('_Real timestamps unavailable this run (older manifest, or a phase never reached Phase 8) - falling back to phase/actor/seconds/outcome only:_')
+        $lines.Add('')
+        $lines.Add('| Phase | Actor | Seconds | Outcome |')
+        $lines.Add('|---|---|---|---|')
+        foreach ($p in @(Get-Prop $timeLedger 'phases' @())) {
+            $name = [string](Get-Prop $p 'name' '')
+            $actor = [string](Get-Prop $p 'actor' '')
+            $secs = Get-Prop $p 'seconds' 0
+            $outcome = [string](Get-Prop $p 'outcome' 'RAN')
+            $lines.Add("| $name | $actor | $secs | $outcome |")
+        }
+        $lines.Add('')
+        $total = [double](Get-Prop $timeLedger 'totalSeconds' 0)
+        $lines.Add("**Total wall-clock: $(Format-Seconds $total)** (phases marked ""overlapped"" run concurrently — this is measured elapsed time, not the column sum)")
+        return ($lines -join "`n")
+    }
+    $lines.Add("**First message:** $rStart &nbsp;→&nbsp; **Report delivered:** $rEnd")
+    $lines.Add('')
+    $lines.Add('| Phase | Actor | Started | Ended | Seconds | Outcome |')
+    $lines.Add('|---|---|---|---|---|---|')
+    $machineSecs = 0.0
+    $waitSecs = 0.0
     foreach ($p in @(Get-Prop $timeLedger 'phases' @())) {
         $name = [string](Get-Prop $p 'name' '')
         $actor = [string](Get-Prop $p 'actor' '')
-        $secs = Get-Prop $p 'seconds' 0
+        $secs = [double](Get-Prop $p 'seconds' 0)
+        $started = [string](Get-Prop $p 'startedAt' '—')
+        $ended = [string](Get-Prop $p 'endedAt' '—')
         $outcome = [string](Get-Prop $p 'outcome' 'RAN')
-        $lines.Add("| $name | $actor | $secs | $outcome |")
+        $lines.Add("| $name | $actor | $started | $ended | $secs | $outcome |")
+        if ($name -eq 'consent-wait') { $waitSecs += $secs } else { $machineSecs += $secs }
     }
     $lines.Add('')
     $total = [double](Get-Prop $timeLedger 'totalSeconds' 0)
-    $lines.Add("**Total wall-clock: $(Format-Seconds $total)** (phases marked ""overlapped"" run concurrently — this is measured elapsed time, not the column sum)")
+    $lines.Add("**Total real elapsed time: $(Format-Seconds $total)** — machine time $(Format-Seconds $machineSecs), developer answer-latency (consent-wait) $(Format-Seconds $waitSecs). The phase table's column sum can be less than this total: gaps between phases (e.g. the moment between one script finishing and the next being dispatched) are real elapsed time too, not double-counted as their own row.")
+    if ($null -ne $perfIssue) {
+        $overThreshold = [bool](Get-Prop $perfIssue 'overThreshold' $false)
+        if ($overThreshold) {
+            $filed = [bool](Get-Prop $perfIssue 'filed' $false)
+            if ($filed) {
+                $issueUrl = [string](Get-Prop $perfIssue 'issueUrl' '')
+                $lines.Add('')
+                $lines.Add("⚠️ This run exceeded the slow-run target — tracked in $issueUrl.")
+            } else {
+                $reason = [string](Get-Prop $perfIssue 'reason' 'unknown reason')
+                $lines.Add('')
+                $lines.Add("⚠️ This run exceeded the slow-run target, but no issue was filed automatically ($reason).")
+            }
+        }
+    }
     return ($lines -join "`n")
 }
 
@@ -922,7 +970,7 @@ $out.Add('|---|---|---|---|---|')
 $ticketDisplay = if ($ticketKey) { $ticketKey } else { '— none —' }
 $out.Add("| $repoSlug | ``$branch`` | ``$baseShaShort`` (fetched $fetchAge) | $ticketDisplay | $($renderedAt.ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)) |")
 $out.Add('')
-$out.Add((Build-RunSummary)); $out.Add('')
+$out.Add((Build-RunTimeline)); $out.Add('')
 $out.Add((Build-FindingDetail)); $out.Add('')
 $out.Add((Build-AcceptanceCriteria)); $out.Add('')
 $out.Add((Build-CapabilityMatrix)); $out.Add('')
