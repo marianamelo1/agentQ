@@ -59,6 +59,15 @@
     Orchestrator-known live state: qa-e2e-author is still authoring new E2E
     specs / running design conformance in the background. No artifact captures
     this fact today, so it must be passed in explicitly when true.
+
+.PARAMETER E2ESkipReason
+    Orchestrator-known reason E2E didn't run this run (e.g. the local dev stack
+    was unreachable) plus the exact command to fix it. No artifact captures a
+    dev-stack health-check result today, so this must be passed in explicitly
+    when known - overrides the generic "no cached E2E specs this run" wording
+    in both the capability matrix row and the E2E section body. Leave unset
+    when E2E genuinely ran with nothing cached, or there's no specific reason
+    to report.
 #>
 [CmdletBinding()]
 param(
@@ -68,7 +77,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ReportPath,
 
-    [switch]$E2EPending
+    [switch]$E2EPending,
+
+    [string]$E2ESkipReason
 )
 
 Set-StrictMode -Version Latest
@@ -511,7 +522,7 @@ function Build-CapabilityMatrix {
         $lines.Add('| E2E | PENDING — authoring in background; next run includes it | — |')
     } elseif (@($e2eScenarios).Count -eq 0) {
         $frontend = [bool](Get-Prop (Get-Prop $diffSet 'levels' $null) 'frontend' $false)
-        $reason = if ($frontend) { 'no cached E2E specs ran this run' } else { 'backend-only diff, no frontend changes' }
+        $reason = if ($E2ESkipReason -ne '') { $E2ESkipReason } elseif ($frontend) { 'no cached E2E specs ran this run' } else { 'backend-only diff, no frontend changes' }
         $lines.Add("| E2E | SKIPPED — $reason | — |")
     } else {
         $lines.Add("| E2E | RAN | $(@($e2eScenarios).Count) scenario(s) — see E2E section |")
@@ -821,6 +832,7 @@ function Build-E2ELevel {
     $ofLevel = Get-ScenariosByLevel -Level 'e2e'
     if (@($ofLevel).Count -eq 0) {
         if ($E2EPending) { $lines.Add('PENDING — authoring in background; next run includes it.') }
+        elseif ($E2ESkipReason -ne '') { $lines.Add("SKIPPED — $E2ESkipReason") }
         else { $lines.Add('SKIPPED — no cached E2E specs this run.') }
     } else {
         foreach ($sc in $ofLevel) {

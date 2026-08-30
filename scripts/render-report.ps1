@@ -62,7 +62,21 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BranchSummary,
 
-    [switch]$Quick
+    [switch]$Quick,
+
+    # Orchestrator-known reason E2E didn't run this run (e.g. dev stack unreachable). Keep
+    # this to ONE short plain sentence with the one concrete fix, e.g. "the local dev stack
+    # wasn't running - run `npm run dev` in C:\dev\client, then re-run this review." This
+    # is the MAIN report - a non-QA reader with no context - so when there's more than one
+    # blocker or a longer story, name the single most actionable one here and put the rest
+    # (every other blocker, investigation detail, suggested follow-up) in the -evidence.md
+    # companion's own -E2ESkipReason instead. The script automatically appends a link to the
+    # evidence file's E2E section after this text, so never hand-write "see evidence file"
+    # into this string yourself - that would duplicate the link. Overrides the generic
+    # "couldn't check in-run" wording in the UI tests row when E2E was skipped for a
+    # specific, known reason rather than never attempted. Leave unset when E2E genuinely
+    # ran, or when there's no specific reason to report (e.g. -quick mode, backend-only diff).
+    [string]$E2ESkipReason
 )
 
 Set-StrictMode -Version Latest
@@ -85,6 +99,18 @@ function Get-Prop {
     $p = $Object.PSObject.Properties[$Name]
     if ($null -eq $p -or $null -eq $p.Value) { return $Default }
     return $p.Value
+}
+
+# GitHub-flavored-markdown heading anchor: lowercase, strip everything but
+# letters/digits/spaces/hyphens, spaces -> hyphens. Used to link a report row
+# straight to its matching heading in the evidence file (e.g. a numbered
+# finding's own "### N. <title>" subsection) instead of just naming the file.
+function Get-MdAnchor {
+    param([string]$Text)
+    $t = $Text.ToLowerInvariant()
+    $t = [regex]::Replace($t, '[^\p{L}\p{Nd} \-]', '')
+    $t = [regex]::Replace($t, '\s+', '-')
+    return $t
 }
 
 function Read-JsonOrNull {
@@ -169,6 +195,9 @@ $manualTests    = Read-JsonOrNull (WsPath 'manual-test-candidates.json')
 $mutants        = Read-JsonOrNull (WsPath 'mutants.json')
 $strykerSummary = Read-JsonOrNull (WsPath (Join-Path 'stryker' 'summary.json'))
 $diffSet        = Read-JsonOrNull (WsPath 'diff-set.json')
+$jiraTicket     = Read-JsonOrNull (WsPath 'jira-ticket.json')
+$e2eHeadingText = if (@(Get-Prop $jiraTicket 'figmaLinks' @()).Count -gt 0) { 'E2E + Design conformance' } else { 'E2E' }
+$e2eHeadingAnchor = Get-MdAnchor $e2eHeadingText
 
 $scenarioFiles = @()
 $scenariosDir = WsPath 'scenarios'
@@ -356,7 +385,8 @@ else {
 $frontendTouched = $false
 if ($null -ne $diffSet) { $frontendTouched = [bool](Get-Prop (Get-Prop $diffSet 'levels' $null) 'frontend' $false) }
 $rowUi = if (-not $frontendTouched) { '⏭️ not needed — no frontend code changed' }
-else { '⚠️ couldn''t check in-run — frontend was touched; see the evidence file''s E2E section for what ran' }
+elseif ($E2ESkipReason -ne '') { "⚠️ couldn't check — $E2ESkipReason ([full detail]($evidenceName#$e2eHeadingAnchor))" }
+else { "⚠️ couldn't check in-run — frontend was touched; see the evidence file's [E2E section]($evidenceName#$e2eHeadingAnchor) for what ran" }
 
 # -----------------------------------------------------------------------------
 # Compose the report
@@ -369,6 +399,8 @@ $quickNote = if ($Quick) { ' · quick review (static checks only — no tests we
 Add-Line "# 🧾 QA review — $repoShort · $headKey"
 Add-Line ''
 Add-Line ('`' + $branch + '`' + " · $dateStr$quickNote · **Result: $resultIcon $resultText**")
+Add-Line ''
+Add-Line "📄 Full technical detail: [$evidenceName]($evidenceName)"
 Add-Line ''
 Add-Line "**🧭 What this branch does:** $BranchSummary"
 Add-Line ''
@@ -404,7 +436,8 @@ if (@($selFindings).Count -eq 0) {
             $pCons  = [string](Get-Prop $plain 'consequence' '')
             $pDo    = [string](Get-Prop $plain 'doThis' '')
         }
-        if ($pTitle -eq '') { $pTitle = [string](Get-Prop $f 'title' '') }
+        $rawTitle = [string](Get-Prop $f 'title' '')
+        if ($pTitle -eq '') { $pTitle = $rawTitle }
         if ($pTitle -eq '') { $pTitle = "Finding $n" }
         if ($pCons -eq '')  { $pCons  = [string](Get-Prop $f 'detail' '') }
         Add-Line "**$n. $pTitle**"
@@ -413,6 +446,12 @@ if (@($selFindings).Count -eq 0) {
             Add-Line ''
             Add-Line ('🛠️ **Do this:** ' + $pDo)
         }
+        Add-Line ''
+        # Anchor built from the SAME "$n. <raw title>" text render-evidence.ps1 uses for
+        # this finding's own "### N. <title>" heading (report-selection.json guarantees
+        # the numbering lines up) - links straight to the technical detail, not just the file.
+        $findingAnchor = Get-MdAnchor "$n. $(if ($rawTitle -ne '') { $rawTitle } else { $pTitle })"
+        Add-Line "📄 [More detail]($evidenceName#$findingAnchor)"
         Add-Line ''
     }
 }
