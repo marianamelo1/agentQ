@@ -15,6 +15,11 @@ reports/*
 # Local editor config — machine/IDE-specific, never shared
 .vscode/
 
+# Playwright MCP session artifacts (console logs, page snapshots, screenshots) —
+# written to the repo root by the Playwright MCP server itself during qa-e2e-author's
+# live-dev-stack exploration, never something agentQ or a developer authors
+.playwright-mcp/
+
 # OS noise
 Thumbs.db
 .DS_Store

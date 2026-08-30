@@ -828,12 +828,18 @@ cut, don't compress; overflow goes to the evidence file):
 ```
 # 🧾 QA review — <repo> · <ticket>
 <branch> · <date> · **Result: 🔴 Not ready yet | 🟢 Ready to open**
+📄 Full technical detail: [<name>-evidence.md](<name>-evidence.md)   (repeated at the bottom too — same link both times)
 **🧭 What this branch does:** one plain sentence.
 
 ## ❌ N things to fix first          (max 3 — or "## ✅ Nothing blocking found")
 **1. <plain title — what would go wrong for a user/partner>**
 2–3 plain sentences on the consequence and why nothing catches it today.
 🛠️ **Do this:** the one action doable right now.
+📄 [More detail](<name>-evidence.md#<anchor of this finding's own "### N. <title>"
+                                     heading>)   (a real GitHub-style markdown
+                                     anchor built from the finding's own
+                                     numbering + raw title — lands on the exact
+                                     technical subsection, not just the file)
 
 ## ✅ What's good                     (bullet points, one concise sentence each;
                                      first bullet is ALWAYS the acceptance-
@@ -847,11 +853,16 @@ cut, don't compress; overflow goes to the evidence file):
                                      the test validates, in plain language —
                                      never the search-match mechanics — ending
                                      with a "[Check this scenario](<Testomat
-                                     URL>)" link. This is the one deliberate
-                                     exception to "no links except the bottom
-                                     evidence pointer": a manual test's own URL
-                                     is an actionable next step, not jargon)
-## 🔍 What was checked               (one table: plain question per row, ✅/⚠️/❌/⏭️)
+                                     URL>)" link — a manual test's own URL is
+                                     an actionable next step, not jargon)
+## 🔍 What was checked               (one table: plain question per row, ✅/⚠️/❌/⏭️;
+                                     a row whose reason is long or has more than
+                                     one part names only the single most
+                                     actionable reason and links to the matching
+                                     evidence-file section for the rest — e.g.
+                                     the UI tests row when E2E was skipped for a
+                                     specific, known cause — never the full essay
+                                     inline)
 ## 🧪 Ready-made tests (N) — keep them?   (numbered one-liners, no paths)
 📄 Full technical detail: [<name>-evidence.md](<name>-evidence.md)   (relative markdown link, not just the filename)
 ```
@@ -862,6 +873,11 @@ cut, don't compress; overflow goes to the evidence file):
 - In the 🔍 table a skipped or degraded check reads `⚠️ couldn't check — <plain
   why>` — never a pass, never an omitted row. Merge risk band verbatim from
   `risk-score.json`; never a "probability of passing CI".
+- Linking policy: every link in the main report is either the evidence-file
+  pointer (top, bottom, per-finding, or a checked-row's "full detail" link —
+  all pointing at the same file, a specific section when a real heading exists
+  in it) or a manual-test candidate's own Testomat URL. Nothing else — no
+  invented links, no links to product-repo files or external systems.
 
 **Evidence file** (`templates/report/evidence-template.md`, rendered
 deterministically by `scripts/render-evidence.ps1` — zero model calls) holds

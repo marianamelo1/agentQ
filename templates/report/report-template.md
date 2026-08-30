@@ -19,6 +19,14 @@
     - A skipped/degraded check reads "⚠️ couldn't check — <plain why>" — never
       a pass, never an omitted row.
     - Numbers come from the workspace JSON artifacts verbatim.
+    - When a reason is long or has more than one part (multiple blockers, an
+      investigation, a suggested follow-up), state only the single most
+      actionable one here and link to the evidence file for the rest — never
+      paste the full essay into this file. This is the main report: a non-QA
+      reader with no context. The evidence-file pointer appears twice: once
+      right after the Result line (for someone who wants full detail
+      immediately) and again at the bottom (the traditional full index) —
+      both point to the same file, never a different link.
     - {{token}} = replace; the guidance comments = delete after filling.
 -->
 
@@ -27,6 +35,8 @@
 `{{branch}}` · {{YYYY-MM-DD}} · 
 
 **Result: {{🔴 Not ready yet | 🟢 Ready to open}}**
+
+📄 Full technical detail: [{{report-name}}-evidence.md]({{report-name}}-evidence.md)
 
 **🧭 What this branch does:** {{one plain sentence, from the intake brief}}
 
@@ -42,6 +52,8 @@
 {{2–3 plain sentences on the consequence}}
 
 🛠️ **Do this:** {{the one action doable right now}}
+
+📄 [More detail]({{report-name}}-evidence.md#{{github-slug of "N. <raw finding title from analyst-brief.json>", matching that finding's own "### N. <title>" heading in the evidence file — see CONTRACTS.md report-selection.json for why the numbering always lines up}})
 
 ## ✅ What's good
 
@@ -90,7 +102,7 @@
 | Public API compatibility | {{✅ safe — … \| ❌ breaking — item N}} |
 | Ticket acceptance criteria | {{✅/⚠️ … \| ⚠️ couldn't check — <plain why>}} |
 | Other repos / suggested manual tests | {{result \| ⚠️ couldn't check — <plain why>}} |
-| UI tests | {{result \| ⏭️ not needed — no frontend change}} |
+| UI tests | {{result \| ⏭️ not needed — no frontend change \| ⚠️ couldn't check — <ONE short reason + the one concrete fix> ([full detail]({{report-name}}-evidence.md#e2e))}} |
 
 ## 🧪 Ready-made tests ({{N}}) — keep them?
 

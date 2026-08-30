@@ -600,7 +600,15 @@ not reporting) — capture both, don't conflate them.
 7. **Execution** (consent already answered in step 2, per
    `toggles.executionConsent` literally — never a judgment call to bypass;
    skipped under `--quick`): E2E additionally needs the dev-stack health check to
-   pass NOW (never auto-start — hand over the command). On yes:
+   pass NOW (never auto-start — hand over the command). A failed health check
+   means E2E (both cached-spec execution and `qa-e2e-author`, which also needs
+   the live app for its Playwright MCP exploration) is skipped for THIS
+   specific, known reason — never render it as the generic "no cached E2E
+   specs this run"/"couldn't check in-run" default. Pass that reason plus the
+   exact start command through to both report scripts: `render-report.ps1
+   -E2ESkipReason "the local dev stack wasn't running at <LOCAL_DEV_CLIENT_URL>
+   — run <the repo's dev command> in <repo path>, then re-run this review"` and
+   the same string to `render-evidence.ps1 -E2ESkipReason "..."` (step 8). On yes:
    `scripts/run-tests.ps1 -GeneratedOnly -ResultsLabel branch` (component/API in
    the worktree → `test-results-generated-branch.json`, never clobbering Phase
    2's `test-results.json`), then anti-vacuity AFTER mutation is done via
